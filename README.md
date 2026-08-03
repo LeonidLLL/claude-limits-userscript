@@ -1,61 +1,87 @@
 # Claude Limits
 
-Минималистичный виджет расхода лимитов [Claude](https://claude.ai) для Tampermonkey.
+A minimal Tampermonkey userscript that shows your Claude usage limits at a glance,
+without opening the Usage page.
 
-Показывает то, ради чего обычно приходится открывать страницу Usage: сколько осталось
-до сброса 5-часового окна, как расходуется недельный лимит и месячные кредиты.
-Без графиков и без лишних экранов — одна плашка в углу.
+The 5-hour session window is the limit that actually interrupts your work, so it gets
+the whole top of the panel. Everything else — the weekly limit and monthly credit
+spend — is one line each. There are no charts: if you need detail, the Usage page
+already has it.
 
-![Скриншот виджета](docs/screenshot.png)
+## What it shows
 
-## Что умеет
+**Badge** (always visible, draggable)
+The session reset time and how much of the window is used: `15:50 · 10%`.
+The colour tells you the state without opening anything.
 
-- **5-часовое окно** — крупно: процент, время до сброса, цветовой статус.
-- **Недельные лимиты** — общий и по моделям (Opus, Sonnet, Cowork и др.).
-  Показываются только те, что реально начали расходоваться.
-- **Кредиты за месяц** — потрачено / лимит, баланс, предупреждение о сгорающем промо.
-- **Риска равномерного плана** на каждой полоске: видно, идёшь ты с запасом
-  или обгоняешь график и рискуешь упереться в лимит до сброса.
-- **Прогноз исчерпания** по среднему темпу и по темпу за последние сутки.
-- Плашку можно перетащить мышью, позиция запоминается.
+**Panel** (click the badge)
 
-## Установка
+- **5-hour window** — a progress ring, time left until reset, and the reset time.
+  Ring colour: green below 65%, yellow 65–75%, orange 75–85%, red above 85%.
+- **Week · all models** — percentage used, an even-pace marker on the bar, faint
+  ticks for day boundaries, and how far ahead or behind that pace you are.
+- **Credits · month** — spent against your monthly spend limit, your account
+  balance, and how much of it is promotional credit with an expiry date.
 
-1. Установи [Tampermonkey](https://www.tampermonkey.net/) для своего браузера.
-2. Открой [claude-limits.user.js](https://raw.githubusercontent.com/LeonidLLL/claude-limits-userscript/main/claude-limits.user.js) —
-   Tampermonkey сам предложит установку.
-3. Обнови вкладку с claude.ai. Плашка появится в правом нижнем углу.
+Per-model weekly sub-limits (Opus, Sonnet, Cowork, Fable) appear only when they have
+actual usage. On most plans they stay dormant and the rows never render.
 
-Обновления прилетают автоматически: Tampermonkey раз в сутки проверяет версию
-в этом репозитории.
+## Install
 
-## Как это работает
+1. Install [Tampermonkey](https://www.tampermonkey.net/).
+2. Open [claude-limits.user.js](https://raw.githubusercontent.com/LeonidLLL/claude-limits-userscript/main/claude-limits.user.js).
+3. Tampermonkey will offer to install it. Accept.
+4. Open [claude.ai](https://claude.ai) — the badge appears in the lower right.
 
-Скрипт не отправляет никуда никаких данных и не требует ключей.
+Installing from the raw URL matters: it wires up `@updateURL`, so Tampermonkey checks
+for new versions daily. A script pasted in by hand never updates.
 
-Он перехватывает запросы, которые claude.ai и так делает к своему API
-(`/api/organizations/{id}/usage`), и раз в 5 минут дополнительно запрашивает
-их сам — теми же cookie сессии, что уже есть в браузере. Данные о балансе
-и промо-кредитах при недоступности API считываются со страницы настроек.
+## How the numbers are derived
 
-Вся история хранится локально в `localStorage` браузера: 48 часов по сессионному
-окну, 8 дней по недельному, 62 дня по тратам. Она нужна для расчёта темпа
-расходования и прогнозов.
+Session and weekly figures come from the same internal endpoint the Usage page uses,
+polled every five minutes and refreshed whenever the page fetches it on its own.
 
-## Ограничения
+The balance and promotional credit are read from the Usage page — either from the
+billing API response or, failing that, from the page itself. Between visits to that
+page the promo figure is kept current by subtracting spend recorded since the
+snapshot, so it does not drift.
 
-- Работает только с интерфейсом claude.ai. При изменении структуры API
-  на стороне Anthropic может потребоваться правка.
-- Состав недельных под-лимитов зависит от тарифа: у тебя будут видны свои.
-- Промо-кредиты определяются эвристически — если их формат в API изменится,
-  блок просто не отобразится.
+### The pace marker
 
-## Разработка
+The bright vertical line on the weekly and monthly bars is where usage would be if
+you spent evenly across the window. Fill to the left of it means headroom; fill to
+the right means you are burning faster than the window allows. The small number next
+to the row name is the gap, in percent for quota and in dollars for credits.
 
-Правишь код — обязательно увеличь номер версии **в двух местах**:
-в заголовке `// @version` и в константе `VERSION`. Иначе Tampermonkey
-не увидит обновления.
+### When it warns
 
-## Лицензия
+Only the risk of running out *before* a reset is worth an alert. Finishing a week at
+85% is headroom, not a problem — unused quota expires either way. So a status line
+appears only when the projection actually crosses 100% before the reset, when the
+last 24 hours are running hot enough to change that projection, or when the
+projected headroom drops under 10 points. Otherwise the row stays quiet.
+
+Promotional credits get one extra check. They are ordinary usage credits — they pay
+for premium models and for overage beyond plan limits — but they expire on a fixed
+date, and your monthly spend limit caps how much of them you can draw down before
+then. If the two do not fit together, the widget says how much will expire and what
+the limit would need to be. That warning stays silent unless the shortfall is over
+$10 and over 10% of the remaining promo, so rounding noise never triggers it.
+
+## Privacy
+
+Everything runs locally in your browser. Nothing is sent anywhere. State — usage
+history, badge position, panel open/closed — lives in `localStorage` under
+`clt25_state`. The organisation ID is read from your session at runtime and is not
+stored in the source.
+
+## Compatibility
+
+Chrome with Tampermonkey, tested on the English claude.ai interface. Other
+Chromium browsers should work. The DOM fallback for balance and promo looks for
+English labels on the Usage page; on other interface languages the API path still
+works.
+
+## Licence
 
 MIT
