@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Limits v28
 // @namespace    lisin.claude.limits
-// @version      28.6
-// @description  Минималистичный трекер лимитов Claude: 5-часовое окно крупно, недельный лимит и кредиты — одной строкой. Без графиков. Подробности — на странице Usage.
+// @version      28.7
+// @description  Minimal Claude usage tracker: the 5-hour window front and center, weekly limit and credits on one line each. No charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
 // @updateURL    https://raw.githubusercontent.com/LeonidLLL/claude-limits-userscript/main/claude-limits.user.js
@@ -16,11 +16,11 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  /* ================= КОНФИГ ================= */
-  const VERSION = '28.6';
+  /* ================= CONFIG ================= */
+  const VERSION = '28.7';
   const POLL_MINUTES = 5;
-  const PROMO_GRANT = 100;              // исходный размер промо-гранта, $
-  const LS_KEY = 'clt25_state';         // прежний ключ — сохраняем историю и позицию бейджа
+  const PROMO_GRANT = 100;              // original promotional grant size, $
+  const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
   const SESSION_WINDOW_MS = 5 * 3600e3;
   const WEEK_WINDOW_MS = 7 * 86400e3;
   const DEDUP_MS = 20 * 60e3;
@@ -33,7 +33,7 @@
   const S = Object.assign({ orgId: null, last: null, lastT: 0, hist: {}, ui: { open: false, pos: null }, balance: null, promo: null }, loadState());
   if (!S.hist) S.hist = {};
 
-  /* ================= СЪЁМ ДАННЫХ ================= */
+  /* ================= DATA CAPTURE ================= */
   const origFetch = window.fetch;
   window.fetch = function (input) {
     const url = (typeof input === 'string') ? input : (input && input.url) || '';
@@ -66,11 +66,11 @@
     polling = true; setBadgeSpin(true); scanDOM();
     try {
       const org = detectOrg();
-      if (!org) { if (manual) toast('orgId не определён — открой любой чат'); polling = false; setBadgeSpin(false); return; }
+      if (!org) { if (manual) toast('orgId not detected — open any chat'); polling = false; setBadgeSpin(false); return; }
       const r = await origFetch(`/api/organizations/${org}/usage`, { headers: { accept: 'application/json' }, credentials: 'include' });
       if (r.ok) ingest(await r.json());
       else if (manual) toast('usage: HTTP ' + r.status);
-    } catch (e) { if (manual) toast('Ошибка: ' + e.message); }
+    } catch (e) { if (manual) toast('Error: ' + e.message); }
     polling = false; setBadgeSpin(false);
   }
 
@@ -89,7 +89,7 @@
     saveState(); render();
   }
 
-  /* ---- баланс и промо: API, DOM как фолбэк ---- */
+  /* ---- balance and promo: API first, DOM as fallback ---- */
   function moneyVal(k, v) {
     if (typeof v !== 'number' || !isFinite(v) || v < 0 || v > 1e6) return null;
     return /minor|cents/i.test(k) ? v / 100 : v;
@@ -120,13 +120,13 @@
     S.promo = {
       amount, expiresAt: expiresAt || (S.promo && S.promo.expiresAt) || null, peak,
       capturedAt: Date.now(), source,
-      spendAtCapture: sp ? sp.used : null,     // трата месяца на момент захвата
-      monthAtCapture: monthStart()             // в каком месяце захвачено
+      spendAtCapture: sp ? sp.used : null,     // month-to-date spend at capture time
+      monthAtCapture: monthStart()             // which month it was captured in
     };
     pushHist('promo_left', amount);
   }
 
-  // текущая месячная трата кредитов
+  // current month-to-date credit spend
   function spendNow() {
     const sp = S.last && S.last.spend;
     if (!sp || !sp.limit || sp.enabled === false) return null;
@@ -134,9 +134,9 @@
     return { used: (sp.used ? sp.used.amount_minor : 0) / pw, lim: sp.limit.amount_minor / pw };
   }
 
-  // Живая оценка остатка промо: снимок со страницы Usage минус траты, случившиеся
-  // после снимка. Без этого трата вычиталась из потолка, но не из промо — и виджет
-  // видел несуществующее расхождение.
+  // Live promo estimate: the Usage-page snapshot minus whatever was spent after it.
+  // Without this, spend was subtracted from the ceiling but not from the promo balance,
+  // so the widget kept reporting a shortfall that did not exist.
   function promoLeft() {
     if (!S.promo || S.promo.amount == null) return null;
     const sp = spendNow();
@@ -157,7 +157,7 @@
   function scanDOM() {
     if (!document.body) return;
     try {
-      const bn = findTextNode(/^current balance$/i) || findTextNode(/^текущий баланс$/i);
+      const bn = findTextNode(/^current balance$/i) || findTextNode(/^account balance$/i);
       if (bn) {
         const row = bn.parentElement && bn.parentElement.closest('div');
         const amt = row && nearbyAmount(row);
@@ -165,12 +165,12 @@
           S.balance = { amount: amt, capturedAt: Date.now(), source: 'dom' }; saveState(); render();
         }
       }
-      const pn = findTextNode(/^promotional credit$/i) || findTextNode(/^промо.?кредит$/i);
+      const pn = findTextNode(/^promotional credit$/i) || findTextNode(/^promo credit$/i);
       if (pn) {
         const row = pn.parentElement && pn.parentElement.closest('div');
         const amt = row && nearbyAmount(row);
         const blockTxt = (row && row.parentElement ? row.parentElement.textContent : '') || '';
-        const ex = blockTxt.match(/(?:expires|истекает|сгорает)\s+([A-Za-zА-Яа-я]+\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}[.\/]\d{1,2}[.\/]\d{4})/i);
+        const ex = blockTxt.match(/(?:expires|expiring|expiration)\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}[.\/]\d{1,2}[.\/]\d{4})/i);
         let expiresAt = null;
         if (ex) { const t = Date.parse(ex[1]); if (isFinite(t)) expiresAt = t; }
         if (amt != null && isFinite(amt)) {
@@ -182,11 +182,11 @@
     } catch (e) {}
   }
 
-  /* ================= ИЗВЛЕЧЕНИЕ ================= */
+  /* ================= EXTRACTION ================= */
   function parseReset(s) {
     if (!s) return null;
     const t = Date.parse(s);
-    if (!isFinite(t) || t < Date.UTC(2020, 0, 1)) return null; // эпоха = лимит не срабатывал
+    if (!isFinite(t) || t < Date.UTC(2020, 0, 1)) return null; // unix epoch = limit never triggered
     return t;
   }
   const SLOT_MAP = {
@@ -195,14 +195,14 @@
     seven_day_cowork:     'Cowork',
     seven_day_oauth_apps: 'API apps',
     seven_day_omelette:   'Fable 5',
-    omelette_promotional: 'Fable 5 · доля',
+    omelette_promotional: 'Fable 5 · share',
   };
 
   function extract(data) {
     const out = [], now = Date.now();
     const limits = Array.isArray(data.limits) ? data.limits : [];
 
-    // --- сессия, 5 ч ---
+    // --- session, 5 h ---
     const sessLim = limits.find(l => l.kind === 'session'), fh = data.five_hour;
     if (fh || sessLim) {
       const pct = (fh && fh.utilization != null) ? fh.utilization : (sessLim ? sessLim.percent : 0);
@@ -211,38 +211,38 @@
       out.push({ key: 'session', pct: idle ? 0 : pct, resetAt: idle ? null : resetAt, windowMs: SESSION_WINDOW_MS, severity: sessLim ? sessLim.severity : 'normal', idle });
     }
 
-    // --- неделя, все модели ---
+    // --- weekly, all models ---
     const weekLim = limits.find(l => l.kind === 'weekly_all'), sd = data.seven_day;
     if (sd || weekLim) {
       const pct = (sd && sd.utilization != null) ? sd.utilization : (weekLim ? weekLim.percent : 0);
-      out.push({ key: 'weekly_all', title: 'Неделя · все модели', pct, resetAt: parseReset(sd ? sd.resets_at : (weekLim ? weekLim.resets_at : null)), windowMs: WEEK_WINDOW_MS, severity: weekLim ? weekLim.severity : 'normal' });
+      out.push({ key: 'weekly_all', title: 'Week · all models', pct, resetAt: parseReset(sd ? sd.resets_at : (weekLim ? weekLim.resets_at : null)), windowMs: WEEK_WINDOW_MS, severity: weekLim ? weekLim.severity : 'normal' });
     }
 
-    // --- под-лимиты: только те, что реально ожили ---
+    // --- sub-limits: only the ones that actually woke up ---
     for (const key in SLOT_MAP) {
       const o = data[key];
       if (!o) continue;
       const pct = o.utilization != null ? o.utilization : 0;
       const resetAt = parseReset(o.resets_at);
-      if (pct <= 0 && !resetAt) continue;                       // спит — не показываем
-      out.push({ key: 'slot_' + key, title: 'Неделя · ' + SLOT_MAP[key], pct, resetAt, windowMs: WEEK_WINDOW_MS, severity: o.severity || 'normal', scoped: true });
+      if (pct <= 0 && !resetAt) continue;                       // dormant — do not render
+      out.push({ key: 'slot_' + key, title: 'Week · ' + SLOT_MAP[key], pct, resetAt, windowMs: WEEK_WINDOW_MS, severity: o.severity || 'normal', scoped: true });
     }
 
-    // --- кредиты за месяц ---
+    // --- monthly credits ---
     const sp = data.spend;
     if (sp && sp.limit && sp.enabled !== false) {
       const e = (sp.limit.exponent != null ? sp.limit.exponent : 2), pw = Math.pow(10, e);
       const used = (sp.used ? sp.used.amount_minor : 0) / pw, lim = sp.limit.amount_minor / pw;
       const mr = monthReset();
-      out.push({ key: 'spend', title: 'Кредиты · месяц', pct: (sp.percent != null) ? sp.percent : (lim > 0 ? used / lim * 100 : 0), resetAt: mr, windowMs: mr - monthStart(), severity: sp.severity, money: { used, lim } });
+      out.push({ key: 'spend', title: 'Credits · month', pct: (sp.percent != null) ? sp.percent : (lim > 0 ? used / lim * 100 : 0), resetAt: mr, windowMs: mr - monthStart(), severity: sp.severity, money: { used, lim } });
     }
     return out;
   }
   function monthReset() { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1); }
   function monthStart() { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); }
 
-  // Плановый (равномерный) расход к текущему моменту окна: где ты «должен» быть,
-  // если тратить ровно. Факт ниже плана = запас, выше = обгоняешь.
+  // Even-pace target for this point in the window: where usage "should" be if spent
+  // evenly. Actual below target = headroom, above = burning faster than the window.
   function planPct(it) {
     if (!it.resetAt || !it.windowMs) return null;
     const start = it.resetAt - it.windowMs;
@@ -250,15 +250,15 @@
     return el / it.windowMs * 100;
   }
 
-  /* ================= СТАТУС ================= */
-  // Правило: тревожит только риск исчерпать лимит ДО сброса.
-  // Выйти к сбросу на 80-90% — это запас, а не проблема: неиспользованное всё равно сгорает.
+  /* ================= STATUS ================= */
+  // Rule: only the risk of running out BEFORE the reset is worth an alert.
+  // Reaching 80-90% at reset is headroom, not a problem — unused quota expires anyway.
   function pace(it) {
     const now = Date.now();
     if (it.idle) return { status: 'idle', note: '' };
 
     if (it.key === 'session') {
-      // зелёный < 65 ≤ жёлтый < 75 ≤ оранжевый < 85 ≤ красный
+      // green < 65 ≤ yellow < 75 ≤ orange < 85 ≤ red
       let st = it.pct >= 85 ? 'bad' : (it.pct >= 75 ? 'hot' : (it.pct >= 65 ? 'warn' : 'ok'));
       if (it.severity === 'critical') st = 'bad';
       return { status: st, note: '' };
@@ -266,7 +266,7 @@
 
     if (it.key === 'spend') {
       const st = it.pct >= 95 ? 'bad' : (it.pct >= 80 ? 'warn' : 'ok');
-      return { status: st, note: st === 'bad' ? 'месячный лимит трат почти выбран' : '' };
+      return { status: st, note: st === 'bad' ? 'monthly spend limit nearly exhausted' : '' };
     }
 
     if (!it.resetAt) return { status: 'ok', note: '' };
@@ -284,33 +284,34 @@
     }
     const proj = avgRate != null ? it.pct + avgRate * left : null;
 
-    if (it.pct >= 100) return { status: 'bad', note: 'исчерпан, сброс через ' + fmtDur(left) };
+    if (it.pct >= 100) return { status: 'bad', note: 'exhausted, resets in ' + fmtDur(left) };
     if (avgRate > 0 && proj >= 100) {
       const d = now + (100 - it.pct) / avgRate;
-      return { status: 'bad', note: 'кончится ' + fmtDay(d) + ' ~' + fmtTime(d) + ', до сброса не хватит' };
+      return { status: 'bad', note: 'runs out ' + fmtDay(d) + ' ~' + fmtTime(d) + ', short of the reset' };
     }
     if (recRate > 0 && it.pct + recRate * left >= 100) {
       const d = now + (100 - it.pct) / recRate;
-      return { status: 'warn', note: 'темп за сутки вырос: так кончится ' + fmtDay(d) };
+      return { status: 'warn', note: 'pace rose over 24h: at this rate it runs out ' + fmtDay(d) };
     }
-    if (proj != null && proj >= 90) return { status: 'warn', note: 'к сбросу ~' + Math.round(proj) + '%, запас мал' };
+    if (proj != null && proj >= 90) return { status: 'warn', note: '~' + Math.round(proj) + '% at reset, little headroom' };
     if (it.severity === 'critical') return { status: 'bad', note: '' };
     return { status: 'ok', note: '' };
   }
 
-  /* ================= ПРОМО ================= */
-  // Промо — обычные кредиты: ими платится Fable 5 и перерасход сверх плана.
-  // Месячный лимит трат ограничивает, сколько промо успеешь выбрать до сгорания.
+  /* ================= PROMO ================= */
+  // Promo credits are ordinary usage credits: they pay for Fable 5 and for any overage
+  // beyond plan limits. The monthly spend limit caps how much of the promo you can
+  // actually draw down before it expires.
   function promoWarning() {
     const left = promoLeft();
     if (left == null || left <= 1) return null;
     if (!S.promo.expiresAt || S.promo.expiresAt <= Date.now()) return null;
     const sp = spendNow();
     if (!sp) return null;
-    // снимок промо старше 30 дней — слишком неточно, чтобы на нём что-то утверждать
+    // a promo snapshot older than 30 days is too stale to assert anything from
     if (Date.now() - (S.promo.capturedAt || 0) > 30 * 86400e3) return null;
 
-    // сколько кредитов физически можно потратить до сгорания при текущем месячном лимите
+    // how much can physically be spent before expiry at the current monthly limit
     let cap = 0, months = 0, first = true, d = new Date();
     let w = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
     while (w < S.promo.expiresAt && months < 24) {
@@ -318,35 +319,35 @@
       const x = new Date(w); w = Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + 1, 1);
     }
     const lost = left - cap;
-    // порог: молчим, пока потери не стали ощутимыми (шум округления и мелочь — не повод)
+    // threshold: stay silent until the loss is material (rounding noise is not a reason)
     if (lost < 10 || lost < left * 0.1) return null;
     const need = Math.ceil(left / Math.max(1, months));
-    if (need <= sp.lim) return null;               // поднимать нечего — лимит уже достаточен
+    if (need <= sp.lim) return null;               // nothing to raise — the limit is already sufficient
     return { left, cap, lost, need, lim: sp.lim, months };
   }
 
-  /* ================= ФОРМАТ ================= */
+  /* ================= FORMATTING ================= */
   function fmtDur(ms) {
     if (ms == null || !isFinite(ms)) return '—';
     ms = Math.max(0, ms);
     const d = Math.floor(ms / 86400e3), h = Math.floor(ms % 86400e3 / 3600e3), m = Math.floor(ms % 3600e3 / 60e3);
-    if (d > 0) return d + 'д ' + h + 'ч';
-    if (h > 0) return h + 'ч ' + m + 'м';
-    return m + 'м';
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm';
   }
   function fmtTime(ts) { const d = new Date(ts); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
-  const DAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   function fmtDay(ts) {
     const d = new Date(ts), n = new Date();
-    if (d.toDateString() === n.toDateString()) return 'сегодня';
-    if (d.toDateString() === new Date(n.getTime() + 86400e3).toDateString()) return 'завтра';
+    if (d.toDateString() === n.toDateString()) return 'today';
+    if (d.toDateString() === new Date(n.getTime() + 86400e3).toDateString()) return 'tomorrow';
     return DAYS[d.getDay()] + ' ' + String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0');
   }
   function fmtAgo(ms) {
     const m = Math.floor(ms / 60e3);
-    if (m < 1) return 'только что';
-    if (m < 60) return m + ' мин назад';
-    return Math.floor(m / 60) + ' ч назад';
+    if (m < 1) return 'just now';
+    if (m < 60) return m + ' min ago';
+    return Math.floor(m / 60) + ' h ago';
   }
   function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -369,7 +370,7 @@
 .clt-hd .t{font-size:11px;font-weight:600;color:#8b8b94;flex:1;letter-spacing:.3px;text-transform:uppercase;}
 .clt-hd button{background:none;border:none;color:#8b8b94;cursor:pointer;font-size:13px;padding:2px 5px;border-radius:6px;line-height:1;}
 .clt-hd button:hover{background:#26262d;color:#fff;}
-/* --- герой: 5-часовое окно --- */
+/* --- hero: the 5-hour window --- */
 .clt-hero{display:flex;align-items:center;gap:14px;padding:2px 0 12px;}
 .clt-hero .ring{position:relative;width:54px;height:54px;flex:none;}
 .clt-hero .ring svg{width:54px;height:54px;transform:rotate(-90deg);display:block;}
@@ -379,7 +380,7 @@
 .clt-hero .big{font-size:26px;font-weight:800;line-height:1.05;letter-spacing:-.5px;}
 .clt-hero .sub{font-size:11.5px;color:#8b8b94;margin-top:3px;}
 .clt-hero .lbl{font-size:10px;color:#6f6f78;text-transform:uppercase;letter-spacing:.6px;margin-bottom:2px;}
-/* --- строки --- */
+/* --- rows --- */
 .clt-row{padding:8px 0;border-top:1px solid #26262d;}
 .clt-row .l1{display:flex;align-items:baseline;gap:8px;font-size:12px;}
 .clt-row .l1 .n{color:#c9c9d2;flex:1;}
@@ -398,36 +399,36 @@
 `;
   }
 
-  // риска равномерного плана на полоске
+  // even-pace marker on the bar
   function planMark(plan) {
     if (plan == null || plan <= 1 || plan >= 99.5) return '';
-    return `<b style="left:${plan.toFixed(1)}%" title="равномерный план: ${Math.round(plan)}%"></b>`;
+    return `<b style="left:${plan.toFixed(1)}%" title="even pace: ${Math.round(plan)}%"></b>`;
   }
-  // мелкие деления шкалы — ориентир, к какому дню относится риска плана
+  // faint ticks — a reference for which day the pace marker sits on
   function tickMarks(positions) {
     return positions.filter(p => p > 1 && p < 99)
       .map(p => `<u style="left:${p.toFixed(2)}%"></u>`).join('');
   }
-  function dayTicks() {                       // неделя: границы суток
+  function dayTicks() {                       // week: day boundaries
     const out = []; for (let i = 1; i < 7; i++) out.push(i / 7 * 100); return tickMarks(out);
   }
-  function decadeTicks(resetAt, windowMs) {   // месяц: каждые 10 дней
+  function decadeTicks(resetAt, windowMs) {   // month: every 10 days
     const days = windowMs / 86400e3, out = [];
     for (let d = 10; d < days; d += 10) out.push(d / days * 100);
     return tickMarks(out);
   }
 
-  // отставание / опережение относительно равномерного плана
+  // behind / ahead of the even pace
   function planTag(fact, plan, unit) {
     if (plan == null || plan <= 0.5) return '';
     const d = fact - plan;
     const eps = unit === '$' ? 0.5 : 2;
-    if (Math.abs(d) < eps) return `<span class="clt-plan" style="color:${COLORS.muted}">= плану</span>`;
-    const ahead = d > 0;                      // тратишь быстрее равномерного
+    if (Math.abs(d) < eps) return `<span class="clt-plan" style="color:${COLORS.muted}">on pace</span>`;
+    const ahead = d > 0;                      // spending faster than even pace
     const txt = unit === '$'
       ? '$' + Math.abs(d).toFixed(Math.abs(d) < 10 ? 1 : 0)
       : Math.round(Math.abs(d)) + '%';
-    const tip = unit === '$' ? 'равномерный план: $' + plan.toFixed(2) : 'равномерный план: ' + Math.round(plan) + '%';
+    const tip = unit === '$' ? 'even pace: $' + plan.toFixed(2) : 'even pace: ' + Math.round(plan) + '%';
     return `<span class="clt-plan" style="color:${ahead ? COLORS.warn : COLORS.ok}" title="${tip}">${ahead ? '+' : '−'}${txt}</span>`;
   }
 
@@ -450,7 +451,7 @@
     root.id = 'clt-root';
     if (S.ui && S.ui.pos) { root.style.right = S.ui.pos.r + 'px'; root.style.bottom = S.ui.pos.b + 'px'; }
     root.innerHTML = `<div id="clt-panel"></div>
-      <div id="clt-badge" title="5-часовое окно — клик: детали, перетаскивание: переместить">
+      <div id="clt-badge" title="5-hour window — click for detail, drag to move">
         <img src="${ICON}" alt=""><span class="t">—</span></div>`;
     document.documentElement.appendChild(root);
     badge = root.querySelector('#clt-badge');
@@ -485,13 +486,13 @@
     const items = S.last ? extract(S.last) : [];
     const sess = items.find(i => i.key === 'session');
 
-    /* --- бейдж: время до сброса + процент --- */
+    /* --- badge: reset time + percentage --- */
     if (sess && !sess.idle) {
       const p = pace(sess);
       badgeTxt.textContent = fmtTime(sess.resetAt) + ' · ' + Math.round(sess.pct) + '%';
       badgeTxt.style.color = COLORS[p.status];
     } else if (sess) {
-      badgeTxt.textContent = 'окно не начато';
+      badgeTxt.textContent = 'window idle';
       badgeTxt.style.color = COLORS.idle;
     } else {
       badgeTxt.textContent = '—'; badgeTxt.style.color = COLORS.muted;
@@ -501,28 +502,28 @@
     if (!S.ui.open) return;
 
     let html = `<div class="clt-hd"><span class="t">Claude Limits</span>
-      <button id="clt-r" title="Обновить">↻</button><button id="clt-x" title="Свернуть">✕</button></div>`;
+      <button id="clt-r" title="Refresh">↻</button><button id="clt-x" title="Collapse">✕</button></div>`;
 
-    /* --- герой --- */
+    /* --- hero --- */
     if (sess) {
       const p = pace(sess), col = COLORS[p.status];
       if (sess.idle) {
         html += `<div class="clt-hero">
           <div class="ring">${ring(0, COLORS.idle)}<div class="rpct" style="color:${COLORS.idle}">0%</div></div>
-          <div><div class="lbl">окно 5 ч</div><div class="big" style="color:${COLORS.idle}">не начато</div>
-          <div class="sub">стартует с первого сообщения</div></div></div>`;
+          <div><div class="lbl">5-hour window</div><div class="big" style="color:${COLORS.idle}">not started</div>
+          <div class="sub">begins with your first message</div></div></div>`;
       } else {
         html += `<div class="clt-hero">
           <div class="ring">${ring(sess.pct, col)}<div class="rpct" style="color:${col}">${Math.round(sess.pct)}%</div></div>
-          <div><div class="lbl">окно 5 ч</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
-          <div class="sub">сброс в ${fmtTime(sess.resetAt)}</div></div></div>`;
+          <div><div class="lbl">5-hour window</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
+          <div class="sub">resets at ${fmtTime(sess.resetAt)}</div></div></div>`;
       }
     } else {
-      html += `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">нет данных</div>
-        <div class="sub">нажми ↻</div></div></div>`;
+      html += `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">no data</div>
+        <div class="sub">press ↻</div></div></div>`;
     }
 
-    /* --- недельные строки --- */
+    /* --- weekly rows --- */
     for (const it of items) {
       if (it.key === 'session' || it.key === 'spend') continue;
       const p = pace(it), col = COLORS[p.status];
@@ -530,41 +531,41 @@
       html += `<div class="clt-row">
         <div class="l1"><span class="n">${esc(it.title)}</span>${planTag(it.pct, plan, '%')}<span class="v" style="color:${col}">${Math.round(it.pct)}%</span></div>
         <div class="clt-bar"><i style="width:${Math.min(100, it.pct)}%;background:${col}"></i>${dayTicks()}${planMark(plan)}</div>
-        ${it.resetAt ? `<div class="clt-sub">сброс ${fmtDay(it.resetAt)} ${fmtTime(it.resetAt)} · через ${fmtDur(it.resetAt - Date.now())}</div>` : ''}
+        ${it.resetAt ? `<div class="clt-sub">resets ${fmtDay(it.resetAt)} ${fmtTime(it.resetAt)} · in ${fmtDur(it.resetAt - Date.now())}</div>` : ''}
         ${p.note ? `<div class="clt-warn" style="color:${col}">${esc(p.note)}</div>` : ''}
       </div>`;
     }
 
-    /* --- деньги --- */
+    /* --- money --- */
     const sp = items.find(i => i.key === 'spend');
     if (sp || S.balance) {
       html += `<div class="clt-row">`;
       if (sp) {
         const p = pace(sp), col = COLORS[p.status];
         const plan = planPct(sp);
-        const planUsd = plan != null ? plan / 100 * sp.money.lim : null;   // сколько «должно» быть потрачено к этому дню
-        html += `<div class="l1"><span class="n">Кредиты · месяц</span>${planTag(sp.money.used, planUsd, '$')}<span class="v" style="color:${col}">$${sp.money.used.toFixed(2)} / $${sp.money.lim.toFixed(0)}</span></div>
+        const planUsd = plan != null ? plan / 100 * sp.money.lim : null;   // what should have been spent by this point
+        html += `<div class="l1"><span class="n">Credits · month</span>${planTag(sp.money.used, planUsd, '$')}<span class="v" style="color:${col}">$${sp.money.used.toFixed(2)} / $${sp.money.lim.toFixed(0)}</span></div>
           <div class="clt-bar"><i style="width:${Math.min(100, sp.pct)}%;background:${col}"></i>${decadeTicks(sp.resetAt, sp.windowMs)}${planMark(plan)}</div>`;
       }
       const bits = [];
-      if (S.balance && S.balance.amount != null) bits.push('баланс $' + S.balance.amount.toFixed(2));
-      if (sp) bits.push('сброс ' + fmtDay(sp.resetAt));
+      if (S.balance && S.balance.amount != null) bits.push('balance $' + S.balance.amount.toFixed(2));
+      if (sp) bits.push('resets ' + fmtDay(sp.resetAt));
       if (bits.length) html += `<div class="clt-sub">${bits.join(' · ')}</div>`;
 
-      // тихая справка: сколько промо и когда сгорает (это часть баланса, а не сверх него)
+      // quiet note: how much promo is left and when it expires (part of the balance, not extra)
       const pl = promoLeft();
       if (pl != null && pl > 1 && S.promo.expiresAt && S.promo.expiresAt > Date.now()) {
-        html += `<div class="clt-sub">из них промо $${pl.toFixed(2)} · сгорает ${fmtDay(S.promo.expiresAt)}</div>`;
+        html += `<div class="clt-sub">incl. promo $${pl.toFixed(2)} · expires ${fmtDay(S.promo.expiresAt)}</div>`;
       }
       const pw = promoWarning();
-      if (pw) html += `<div class="clt-warn" style="color:${COLORS.warn}">⚠ до ${fmtDay(S.promo.expiresAt)} успеешь потратить только $${pw.cap.toFixed(0)} из $${pw.left.toFixed(0)} промо — сгорит $${pw.lost.toFixed(0)}. Лимит трат надо поднять до $${pw.need}/мес</div>`;
+      if (pw) html += `<div class="clt-warn" style="color:${COLORS.warn}">⚠ only $${pw.cap.toFixed(0)} of your $${pw.left.toFixed(0)} promo can be spent before ${fmtDay(S.promo.expiresAt)} — $${pw.lost.toFixed(0)} will expire. Raise the spend limit to $${pw.need}/mo</div>`;
       html += `</div>`;
     }
 
     const stale = S.lastT && (Date.now() - S.lastT > POLL_MINUTES * 2 * 60e3);
     html += `<div class="clt-ft">
-      <a href="/settings/usage" target="_blank">Подробности → Usage</a><span class="sp"></span>
-      <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : 'нет данных'}</span>
+      <a href="/settings/usage" target="_blank">Full detail → Usage</a><span class="sp"></span>
+      <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : 'no data'}</span>
       <span>v${VERSION}</span></div>`;
 
     panel.innerHTML = html;
@@ -581,7 +582,7 @@
     setTimeout(() => x.remove(), 4000);
   }
 
-  /* ================= СТАРТ ================= */
+  /* ================= STARTUP ================= */
   function start() {
     buildUI();
     scanDOM();
