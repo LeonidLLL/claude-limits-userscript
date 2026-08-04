@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Claude Limits v28
+// @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.0
+// @version      29.1
 // @description  Minimal Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each. No charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.0';
+  const VERSION = '29.1';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
