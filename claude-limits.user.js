@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Limits v28
 // @namespace    lisin.claude.limits
-// @version      28.7
-// @description  Minimal Claude usage tracker: the 5-hour window front and center, weekly limit and credits on one line each. No charts. Full detail lives on the Usage page.
+// @version      29.0
+// @description  Minimal Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each. No charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
 // @updateURL    https://raw.githubusercontent.com/LeonidLLL/claude-limits-userscript/main/claude-limits.user.js
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '28.7';
+  const VERSION = '29.0';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -32,6 +32,72 @@
   function saveState() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) {} }
   const S = Object.assign({ orgId: null, last: null, lastT: 0, hist: {}, ui: { open: false, pos: null }, balance: null, promo: null }, loadState());
   if (!S.hist) S.hist = {};
+  if (!S.ui) S.ui = { open: false, pos: null };
+  // first run: follow the browser language, then remember whatever the user picks
+  if (!S.ui.lang) S.ui.lang = /^ru\b/i.test(navigator.language || '') ? 'ru' : 'en';
+
+  /* ================= I18N ================= */
+  // UI strings only. Code and comments stay English so the repo is contributor-friendly.
+  const I18N = {
+    en: {
+      code: 'EN',
+      hero: '5-hour window', notStarted: 'not started', beginsWith: 'begins with your first message',
+      resetsAt: t => 'resets at ' + t, windowIdle: 'window idle',
+      noData: 'no data', pressRefresh: 'press ↻',
+      weekAll: 'Week · all models', weekPrefix: 'Week · ', fableShare: 'Fable 5 · share',
+      creditsMonth: 'Credits · month',
+      rowResets: (day, time, left) => 'resets ' + day + ' ' + time + ' · in ' + left,
+      balance: v => 'balance $' + v, spendResets: d => 'resets ' + d,
+      inclPromo: (v, d) => 'incl. promo $' + v + ' · expires ' + d,
+      promoWarn: (cap, left, day, lost, need) =>
+        '⚠ only $' + cap + ' of your $' + left + ' promo can be spent before ' + day +
+        ' — $' + lost + ' will expire. Raise the spend limit to $' + need + '/mo',
+      onPace: 'on pace', evenPace: v => 'even pace: ' + v,
+      spendNearLimit: 'monthly spend limit nearly exhausted',
+      exhausted: left => 'exhausted, resets in ' + left,
+      runsOut: (day, time) => 'runs out ' + day + ' ~' + time + ', short of the reset',
+      paceRose: day => 'pace rose over 24h: at this rate it runs out ' + day,
+      littleHeadroom: p => '~' + p + '% at reset, little headroom',
+      fullDetail: 'Full detail → Usage',
+      tipRefresh: 'Refresh', tipCollapse: 'Collapse', tipLang: 'Switch language',
+      tipBadge: '5-hour window — click for detail, drag to move',
+      noOrg: 'orgId not detected — open any chat', error: e => 'Error: ' + e,
+      days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+      today: 'today', tomorrow: 'tomorrow',
+      dur: (d, h, m) => d > 0 ? d + 'd ' + h + 'h' : (h > 0 ? h + 'h ' + m + 'm' : m + 'm'),
+      justNow: 'just now', minAgo: m => m + ' min ago', hourAgo: h => h + ' h ago'
+    },
+    ru: {
+      code: 'RU',
+      hero: 'окно 5 ч', notStarted: 'не начато', beginsWith: 'стартует с первого сообщения',
+      resetsAt: t => 'сброс в ' + t, windowIdle: 'окно не начато',
+      noData: 'нет данных', pressRefresh: 'нажми ↻',
+      weekAll: 'Неделя · все модели', weekPrefix: 'Неделя · ', fableShare: 'Fable 5 · доля',
+      creditsMonth: 'Кредиты · месяц',
+      rowResets: (day, time, left) => 'сброс ' + day + ' ' + time + ' · через ' + left,
+      balance: v => 'баланс $' + v, spendResets: d => 'сброс ' + d,
+      inclPromo: (v, d) => 'из них промо $' + v + ' · сгорает ' + d,
+      promoWarn: (cap, left, day, lost, need) =>
+        '⚠ до ' + day + ' успеешь потратить только $' + cap + ' из $' + left +
+        ' промо — сгорит $' + lost + '. Лимит трат надо поднять до $' + need + '/мес',
+      onPace: 'по плану', evenPace: v => 'равномерный план: ' + v,
+      spendNearLimit: 'месячный лимит трат почти выбран',
+      exhausted: left => 'исчерпан, сброс через ' + left,
+      runsOut: (day, time) => 'кончится ' + day + ' ~' + time + ', до сброса не хватит',
+      paceRose: day => 'темп за сутки вырос: так кончится ' + day,
+      littleHeadroom: p => 'к сбросу ~' + p + '%, запас мал',
+      fullDetail: 'Подробности → Usage',
+      tipRefresh: 'Обновить', tipCollapse: 'Свернуть', tipLang: 'Переключить язык',
+      tipBadge: '5-часовое окно — клик: детали, перетаскивание: переместить',
+      noOrg: 'orgId не определён — открой любой чат', error: e => 'Ошибка: ' + e,
+      days: ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'],
+      today: 'сегодня', tomorrow: 'завтра',
+      dur: (d, h, m) => d > 0 ? d + 'д ' + h + 'ч' : (h > 0 ? h + 'ч ' + m + 'м' : m + 'м'),
+      justNow: 'только что', minAgo: m => m + ' мин назад', hourAgo: h => h + ' ч назад'
+    }
+  };
+  function L() { return I18N[S.ui.lang] || I18N.en; }
+  function toggleLang() { S.ui.lang = (S.ui.lang === 'ru') ? 'en' : 'ru'; saveState(); render(); }
 
   /* ================= DATA CAPTURE ================= */
   const origFetch = window.fetch;
@@ -66,11 +132,11 @@
     polling = true; setBadgeSpin(true); scanDOM();
     try {
       const org = detectOrg();
-      if (!org) { if (manual) toast('orgId not detected — open any chat'); polling = false; setBadgeSpin(false); return; }
+      if (!org) { if (manual) toast(L().noOrg); polling = false; setBadgeSpin(false); return; }
       const r = await origFetch(`/api/organizations/${org}/usage`, { headers: { accept: 'application/json' }, credentials: 'include' });
       if (r.ok) ingest(await r.json());
       else if (manual) toast('usage: HTTP ' + r.status);
-    } catch (e) { if (manual) toast('Error: ' + e.message); }
+    } catch (e) { if (manual) toast(L().error(e.message)); }
     polling = false; setBadgeSpin(false);
   }
 
@@ -195,7 +261,7 @@
     seven_day_cowork:     'Cowork',
     seven_day_oauth_apps: 'API apps',
     seven_day_omelette:   'Fable 5',
-    omelette_promotional: 'Fable 5 · share',
+    omelette_promotional: '@fableShare',
   };
 
   function extract(data) {
@@ -215,7 +281,7 @@
     const weekLim = limits.find(l => l.kind === 'weekly_all'), sd = data.seven_day;
     if (sd || weekLim) {
       const pct = (sd && sd.utilization != null) ? sd.utilization : (weekLim ? weekLim.percent : 0);
-      out.push({ key: 'weekly_all', title: 'Week · all models', pct, resetAt: parseReset(sd ? sd.resets_at : (weekLim ? weekLim.resets_at : null)), windowMs: WEEK_WINDOW_MS, severity: weekLim ? weekLim.severity : 'normal' });
+      out.push({ key: 'weekly_all', title: L().weekAll, pct, resetAt: parseReset(sd ? sd.resets_at : (weekLim ? weekLim.resets_at : null)), windowMs: WEEK_WINDOW_MS, severity: weekLim ? weekLim.severity : 'normal' });
     }
 
     // --- sub-limits: only the ones that actually woke up ---
@@ -225,7 +291,7 @@
       const pct = o.utilization != null ? o.utilization : 0;
       const resetAt = parseReset(o.resets_at);
       if (pct <= 0 && !resetAt) continue;                       // dormant — do not render
-      out.push({ key: 'slot_' + key, title: 'Week · ' + SLOT_MAP[key], pct, resetAt, windowMs: WEEK_WINDOW_MS, severity: o.severity || 'normal', scoped: true });
+      out.push({ key: 'slot_' + key, title: L().weekPrefix + (SLOT_MAP[key] === '@fableShare' ? L().fableShare : SLOT_MAP[key]), pct, resetAt, windowMs: WEEK_WINDOW_MS, severity: o.severity || 'normal', scoped: true });
     }
 
     // --- monthly credits ---
@@ -234,7 +300,7 @@
       const e = (sp.limit.exponent != null ? sp.limit.exponent : 2), pw = Math.pow(10, e);
       const used = (sp.used ? sp.used.amount_minor : 0) / pw, lim = sp.limit.amount_minor / pw;
       const mr = monthReset();
-      out.push({ key: 'spend', title: 'Credits · month', pct: (sp.percent != null) ? sp.percent : (lim > 0 ? used / lim * 100 : 0), resetAt: mr, windowMs: mr - monthStart(), severity: sp.severity, money: { used, lim } });
+      out.push({ key: 'spend', title: L().creditsMonth, pct: (sp.percent != null) ? sp.percent : (lim > 0 ? used / lim * 100 : 0), resetAt: mr, windowMs: mr - monthStart(), severity: sp.severity, money: { used, lim } });
     }
     return out;
   }
@@ -266,7 +332,7 @@
 
     if (it.key === 'spend') {
       const st = it.pct >= 95 ? 'bad' : (it.pct >= 80 ? 'warn' : 'ok');
-      return { status: st, note: st === 'bad' ? 'monthly spend limit nearly exhausted' : '' };
+      return { status: st, note: st === 'bad' ? L().spendNearLimit : '' };
     }
 
     if (!it.resetAt) return { status: 'ok', note: '' };
@@ -284,16 +350,16 @@
     }
     const proj = avgRate != null ? it.pct + avgRate * left : null;
 
-    if (it.pct >= 100) return { status: 'bad', note: 'exhausted, resets in ' + fmtDur(left) };
+    if (it.pct >= 100) return { status: 'bad', note: L().exhausted(fmtDur(left)) };
     if (avgRate > 0 && proj >= 100) {
       const d = now + (100 - it.pct) / avgRate;
-      return { status: 'bad', note: 'runs out ' + fmtDay(d) + ' ~' + fmtTime(d) + ', short of the reset' };
+      return { status: 'bad', note: L().runsOut(fmtDay(d), fmtTime(d)) };
     }
     if (recRate > 0 && it.pct + recRate * left >= 100) {
       const d = now + (100 - it.pct) / recRate;
-      return { status: 'warn', note: 'pace rose over 24h: at this rate it runs out ' + fmtDay(d) };
+      return { status: 'warn', note: L().paceRose(fmtDay(d)) };
     }
-    if (proj != null && proj >= 90) return { status: 'warn', note: '~' + Math.round(proj) + '% at reset, little headroom' };
+    if (proj != null && proj >= 90) return { status: 'warn', note: L().littleHeadroom(Math.round(proj)) };
     if (it.severity === 'critical') return { status: 'bad', note: '' };
     return { status: 'ok', note: '' };
   }
@@ -331,23 +397,20 @@
     if (ms == null || !isFinite(ms)) return '—';
     ms = Math.max(0, ms);
     const d = Math.floor(ms / 86400e3), h = Math.floor(ms % 86400e3 / 3600e3), m = Math.floor(ms % 3600e3 / 60e3);
-    if (d > 0) return d + 'd ' + h + 'h';
-    if (h > 0) return h + 'h ' + m + 'm';
-    return m + 'm';
+    return L().dur(d, h, m);
   }
   function fmtTime(ts) { const d = new Date(ts); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
-  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   function fmtDay(ts) {
     const d = new Date(ts), n = new Date();
-    if (d.toDateString() === n.toDateString()) return 'today';
-    if (d.toDateString() === new Date(n.getTime() + 86400e3).toDateString()) return 'tomorrow';
-    return DAYS[d.getDay()] + ' ' + String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0');
+    if (d.toDateString() === n.toDateString()) return L().today;
+    if (d.toDateString() === new Date(n.getTime() + 86400e3).toDateString()) return L().tomorrow;
+    return L().days[d.getDay()] + ' ' + String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0');
   }
   function fmtAgo(ms) {
     const m = Math.floor(ms / 60e3);
-    if (m < 1) return 'just now';
-    if (m < 60) return m + ' min ago';
-    return Math.floor(m / 60) + ' h ago';
+    if (m < 1) return L().justNow;
+    if (m < 60) return L().minAgo(m);
+    return L().hourAgo(Math.floor(m / 60));
   }
   function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -370,6 +433,7 @@
 .clt-hd .t{font-size:11px;font-weight:600;color:#8b8b94;flex:1;letter-spacing:.3px;text-transform:uppercase;}
 .clt-hd button{background:none;border:none;color:#8b8b94;cursor:pointer;font-size:13px;padding:2px 5px;border-radius:6px;line-height:1;}
 .clt-hd button:hover{background:#26262d;color:#fff;}
+.clt-hd button.lang{font-size:9.5px;font-weight:700;letter-spacing:.5px;border:1px solid #3a3a44;padding:2px 5px;}
 /* --- hero: the 5-hour window --- */
 .clt-hero{display:flex;align-items:center;gap:14px;padding:2px 0 12px;}
 .clt-hero .ring{position:relative;width:54px;height:54px;flex:none;}
@@ -402,7 +466,7 @@
   // even-pace marker on the bar
   function planMark(plan) {
     if (plan == null || plan <= 1 || plan >= 99.5) return '';
-    return `<b style="left:${plan.toFixed(1)}%" title="even pace: ${Math.round(plan)}%"></b>`;
+    return `<b style="left:${plan.toFixed(1)}%" title="${L().evenPace(Math.round(plan) + '%')}"></b>`;
   }
   // faint ticks — a reference for which day the pace marker sits on
   function tickMarks(positions) {
@@ -423,12 +487,12 @@
     if (plan == null || plan <= 0.5) return '';
     const d = fact - plan;
     const eps = unit === '$' ? 0.5 : 2;
-    if (Math.abs(d) < eps) return `<span class="clt-plan" style="color:${COLORS.muted}">on pace</span>`;
+    if (Math.abs(d) < eps) return `<span class="clt-plan" style="color:${COLORS.muted}">${L().onPace}</span>`;
     const ahead = d > 0;                      // spending faster than even pace
     const txt = unit === '$'
       ? '$' + Math.abs(d).toFixed(Math.abs(d) < 10 ? 1 : 0)
       : Math.round(Math.abs(d)) + '%';
-    const tip = unit === '$' ? 'even pace: $' + plan.toFixed(2) : 'even pace: ' + Math.round(plan) + '%';
+    const tip = L().evenPace(unit === '$' ? '$' + plan.toFixed(2) : Math.round(plan) + '%');
     return `<span class="clt-plan" style="color:${ahead ? COLORS.warn : COLORS.ok}" title="${tip}">${ahead ? '+' : '−'}${txt}</span>`;
   }
 
@@ -451,7 +515,7 @@
     root.id = 'clt-root';
     if (S.ui && S.ui.pos) { root.style.right = S.ui.pos.r + 'px'; root.style.bottom = S.ui.pos.b + 'px'; }
     root.innerHTML = `<div id="clt-panel"></div>
-      <div id="clt-badge" title="5-hour window — click for detail, drag to move">
+      <div id="clt-badge">
         <img src="${ICON}" alt=""><span class="t">—</span></div>`;
     document.documentElement.appendChild(root);
     badge = root.querySelector('#clt-badge');
@@ -492,17 +556,20 @@
       badgeTxt.textContent = fmtTime(sess.resetAt) + ' · ' + Math.round(sess.pct) + '%';
       badgeTxt.style.color = COLORS[p.status];
     } else if (sess) {
-      badgeTxt.textContent = 'window idle';
+      badgeTxt.textContent = L().windowIdle;
       badgeTxt.style.color = COLORS.idle;
     } else {
       badgeTxt.textContent = '—'; badgeTxt.style.color = COLORS.muted;
     }
 
+    badge.title = L().tipBadge;
     panel.classList.toggle('open', !!S.ui.open);
     if (!S.ui.open) return;
 
     let html = `<div class="clt-hd"><span class="t">Claude Limits</span>
-      <button id="clt-r" title="Refresh">↻</button><button id="clt-x" title="Collapse">✕</button></div>`;
+      <button id="clt-l" class="lang" title="${L().tipLang}">${L().code}</button>
+      <button id="clt-r" title="${L().tipRefresh}">↻</button>
+      <button id="clt-x" title="${L().tipCollapse}">✕</button></div>`;
 
     /* --- hero --- */
     if (sess) {
@@ -510,17 +577,17 @@
       if (sess.idle) {
         html += `<div class="clt-hero">
           <div class="ring">${ring(0, COLORS.idle)}<div class="rpct" style="color:${COLORS.idle}">0%</div></div>
-          <div><div class="lbl">5-hour window</div><div class="big" style="color:${COLORS.idle}">not started</div>
-          <div class="sub">begins with your first message</div></div></div>`;
+          <div><div class="lbl">${L().hero}</div><div class="big" style="color:${COLORS.idle}">${L().notStarted}</div>
+          <div class="sub">${L().beginsWith}</div></div></div>`;
       } else {
         html += `<div class="clt-hero">
           <div class="ring">${ring(sess.pct, col)}<div class="rpct" style="color:${col}">${Math.round(sess.pct)}%</div></div>
-          <div><div class="lbl">5-hour window</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
-          <div class="sub">resets at ${fmtTime(sess.resetAt)}</div></div></div>`;
+          <div><div class="lbl">${L().hero}</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
+          <div class="sub">${L().resetsAt(fmtTime(sess.resetAt))}</div></div></div>`;
       }
     } else {
-      html += `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">no data</div>
-        <div class="sub">press ↻</div></div></div>`;
+      html += `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">${L().noData}</div>
+        <div class="sub">${L().pressRefresh}</div></div></div>`;
     }
 
     /* --- weekly rows --- */
@@ -531,7 +598,7 @@
       html += `<div class="clt-row">
         <div class="l1"><span class="n">${esc(it.title)}</span>${planTag(it.pct, plan, '%')}<span class="v" style="color:${col}">${Math.round(it.pct)}%</span></div>
         <div class="clt-bar"><i style="width:${Math.min(100, it.pct)}%;background:${col}"></i>${dayTicks()}${planMark(plan)}</div>
-        ${it.resetAt ? `<div class="clt-sub">resets ${fmtDay(it.resetAt)} ${fmtTime(it.resetAt)} · in ${fmtDur(it.resetAt - Date.now())}</div>` : ''}
+        ${it.resetAt ? `<div class="clt-sub">${L().rowResets(fmtDay(it.resetAt), fmtTime(it.resetAt), fmtDur(it.resetAt - Date.now()))}</div>` : ''}
         ${p.note ? `<div class="clt-warn" style="color:${col}">${esc(p.note)}</div>` : ''}
       </div>`;
     }
@@ -544,32 +611,33 @@
         const p = pace(sp), col = COLORS[p.status];
         const plan = planPct(sp);
         const planUsd = plan != null ? plan / 100 * sp.money.lim : null;   // what should have been spent by this point
-        html += `<div class="l1"><span class="n">Credits · month</span>${planTag(sp.money.used, planUsd, '$')}<span class="v" style="color:${col}">$${sp.money.used.toFixed(2)} / $${sp.money.lim.toFixed(0)}</span></div>
+        html += `<div class="l1"><span class="n">${L().creditsMonth}</span>${planTag(sp.money.used, planUsd, '$')}<span class="v" style="color:${col}">$${sp.money.used.toFixed(2)} / $${sp.money.lim.toFixed(0)}</span></div>
           <div class="clt-bar"><i style="width:${Math.min(100, sp.pct)}%;background:${col}"></i>${decadeTicks(sp.resetAt, sp.windowMs)}${planMark(plan)}</div>`;
       }
       const bits = [];
-      if (S.balance && S.balance.amount != null) bits.push('balance $' + S.balance.amount.toFixed(2));
-      if (sp) bits.push('resets ' + fmtDay(sp.resetAt));
+      if (S.balance && S.balance.amount != null) bits.push(L().balance(S.balance.amount.toFixed(2)));
+      if (sp) bits.push(L().spendResets(fmtDay(sp.resetAt)));
       if (bits.length) html += `<div class="clt-sub">${bits.join(' · ')}</div>`;
 
       // quiet note: how much promo is left and when it expires (part of the balance, not extra)
       const pl = promoLeft();
       if (pl != null && pl > 1 && S.promo.expiresAt && S.promo.expiresAt > Date.now()) {
-        html += `<div class="clt-sub">incl. promo $${pl.toFixed(2)} · expires ${fmtDay(S.promo.expiresAt)}</div>`;
+        html += `<div class="clt-sub">${L().inclPromo(pl.toFixed(2), fmtDay(S.promo.expiresAt))}</div>`;
       }
       const pw = promoWarning();
-      if (pw) html += `<div class="clt-warn" style="color:${COLORS.warn}">⚠ only $${pw.cap.toFixed(0)} of your $${pw.left.toFixed(0)} promo can be spent before ${fmtDay(S.promo.expiresAt)} — $${pw.lost.toFixed(0)} will expire. Raise the spend limit to $${pw.need}/mo</div>`;
+      if (pw) html += `<div class="clt-warn" style="color:${COLORS.warn}">${L().promoWarn(pw.cap.toFixed(0), pw.left.toFixed(0), fmtDay(S.promo.expiresAt), pw.lost.toFixed(0), pw.need)}</div>`;
       html += `</div>`;
     }
 
     const stale = S.lastT && (Date.now() - S.lastT > POLL_MINUTES * 2 * 60e3);
     html += `<div class="clt-ft">
-      <a href="/settings/usage" target="_blank">Full detail → Usage</a><span class="sp"></span>
-      <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : 'no data'}</span>
+      <a href="/settings/usage" target="_blank">${L().fullDetail}</a><span class="sp"></span>
+      <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : L().noData}</span>
       <span>v${VERSION}</span></div>`;
 
     panel.innerHTML = html;
-    const rb = panel.querySelector('#clt-r'), xb = panel.querySelector('#clt-x');
+    const rb = panel.querySelector('#clt-r'), xb = panel.querySelector('#clt-x'), lb = panel.querySelector('#clt-l');
+    if (lb) lb.onclick = toggleLang;
     if (rb) rb.onclick = () => poll(true);
     if (xb) xb.onclick = () => { S.ui.open = false; saveState(); render(); };
   }
