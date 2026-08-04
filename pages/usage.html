@@ -5,32 +5,47 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Limits</title>
 
-<!-- Level 1: instant, no history entry -->
-<script>location.replace('https://claude.ai/settings/usage');</script>
-
-<!-- Level 2: fires if JS is blocked -->
-<meta http-equiv="refresh" content="0; url=https://claude.ai/settings/usage">
-
-<!-- Home-screen icon. NO manifest.json here on purpose:
-     a web app manifest makes Chrome install a WebAPK that always
-     opens start_url instead of this page. -->
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <meta name="theme-color" content="#262624">
 
+<!-- NO manifest.json here on purpose: a web app manifest makes Chrome
+     install a WebAPK that always opens start_url instead of this page. -->
+
+<script>
+(function () {
+  var TARGET = 'https://claude.ai/settings/usage';
+
+  // ?stay = setup mode. The page does NOT redirect, so you can sit on it
+  // and use "Add to Home screen". replaceState strips ?stay from the address
+  // bar first, so the shortcut Chrome saves points at the clean URL.
+  if (location.search.indexOf('stay') > -1) {
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+    document.addEventListener('DOMContentLoaded', function () {
+      document.getElementById('hint').style.display = 'block';
+    });
+    return;
+  }
+
+  location.replace(TARGET);
+})();
+</script>
+
 <style>
   html,body{height:100%;margin:0}
   body{
-    display:flex;align-items:center;justify-content:center;
+    display:flex;flex-direction:column;gap:18px;
+    align-items:center;justify-content:center;text-align:center;padding:24px;
     background:#262624;color:#e8e6e3;
     font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   }
   a{color:#d97757;font-weight:600;text-decoration:none;
     border:1px solid #d97757;border-radius:10px;padding:14px 22px}
+  #hint{display:none;max-width:34ch;font-size:14px;opacity:.65}
 </style>
 </head>
 <body>
-  <!-- Level 3: manual tap if nothing above worked -->
   <a href="https://claude.ai/settings/usage">Открыть Usage &rarr;</a>
+  <p id="hint">Режим настройки. Меню &#8942; &rarr; «Добавить на главный экран».</p>
 </body>
 </html>
