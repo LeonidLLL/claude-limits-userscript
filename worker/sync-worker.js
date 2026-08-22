@@ -15,6 +15,13 @@
 // as NaN and scramble ordering unpredictably). Neither fires today since the client only
 // ever sends well-formed data, which is exactly why they're easy to lose track of —
 // they're for whatever adds a new key or a malformed client six months from now.
+//
+// v4: every filter above drops silently — a 200 with an empty-looking hist.session gives
+// no way to tell "nothing was sent", "the key isn't whitelisted", "shape check failed",
+// "collapsed as a near-duplicate" and "aged out past KEEP" apart. The POST response now
+// carries a `sync` block with those counts (per reason, plus a per-key breakdown) so a
+// stuck sync is diagnosable from the response alone. `hist` itself is untouched — this is
+// additive, the old `{ hist }` shape still round-trips through anything reading only that.
 
 const KEEP = {
   session: 30 * 86400e3,
@@ -38,36 +45,53 @@ const CORS = {
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
 };
 
-// {t,p} shape — collapse near-duplicate samples of the same reading. Filters to
-// well-formed entries first: an object with a non-numeric t would sort as NaN and
-// scramble the order unpredictably.
-function mergePoints(a, b, keep) {
-  const all = [...(a || []), ...(b || [])]
-    .filter(p => p && typeof p.t === 'number' && typeof p.p === 'number')
-    .sort((x, y) => x.t - y.t);
-  const out = [];
+// Shared merge/dedup/expiry pipeline for both point shapes below. `wellFormed` is the
+// per-item shape check, `sameValue` decides whether two same-second entries count as a
+// duplicate (points compare .p; pairs have no natural "same value" so always collapse).
+// Every incoming item is bucketed into exactly one outcome — accepted, malformed (failed
+// wellFormed), duplicate (collapsed against a same-window entry) or expired (older than
+// `keep` after the merge) — via reference identity through the filter/sort/dedupe/cut
+// pipeline, since none of those steps clone the objects.
+function classify(a, b, keep, wellFormed, sameValue) {
+  const stored = a || [], incoming = b || [];
+  const incomingValid = new Set(incoming.filter(wellFormed));
+  const malformed = incoming.length - incomingValid.size;
+
+  const all = [...stored, ...incoming].filter(wellFormed).sort((x, y) => x.t - y.t);
+
+  const deduped = [];
   for (const p of all) {
-    const last = out[out.length - 1];
-    if (last && Math.abs(p.t - last.t) < 60000 && last.p === p.p) continue;
-    out.push(p);
+    const last = deduped[deduped.length - 1];
+    if (last && Math.abs(p.t - last.t) < 60000 && sameValue(last, p)) continue;
+    deduped.push(p);
   }
+
   const cut = Date.now() - keep;
-  return out.filter(p => p.t >= cut);
+  const out = deduped.filter(p => p.t >= cut);
+
+  const dedupedSet = new Set(deduped), outSet = new Set(out);
+  let accepted = 0, duplicate = 0, expired = 0;
+  for (const item of incomingValid) {
+    if (outSet.has(item)) accepted++;
+    else if (dedupedSet.has(item)) expired++;
+    else duplicate++;
+  }
+
+  return { out, stats: { received: incoming.length, accepted, malformed, duplicate, expired } };
+}
+
+// {t,p} shape — collapse near-duplicate samples of the same reading.
+function mergePoints(a, b, keep) {
+  return classify(a, b, keep,
+    p => p && typeof p.t === 'number' && typeof p.p === 'number',
+    (x, y) => x.p === y.p);
 }
 
 // {t,ds,dw} shape — no value to compare, dedup on t alone
 function mergePairs(a, b, keep) {
-  const all = [...(a || []), ...(b || [])]
-    .filter(p => p && typeof p.t === 'number' && typeof p.ds === 'number' && typeof p.dw === 'number')
-    .sort((x, y) => x.t - y.t);
-  const out = [];
-  for (const p of all) {
-    const last = out[out.length - 1];
-    if (last && Math.abs(p.t - last.t) < 60000) continue;
-    out.push(p);
-  }
-  const cut = Date.now() - keep;
-  return out.filter(p => p.t >= cut);
+  return classify(a, b, keep,
+    p => p && typeof p.t === 'number' && typeof p.ds === 'number' && typeof p.dw === 'number',
+    () => true);
 }
 
 function merge(key, a, b, keep) {
@@ -87,12 +111,41 @@ export default {
     if (req.method === 'POST') {
       const body = await req.json();
       const incoming = body.hist || {};
+      const incomingKeys = Object.keys(incoming);
       const out = {};
-      const keys = new Set([...SYNCABLE_BASE, ...Object.keys(stored), ...Object.keys(incoming)].filter(isSyncable));
-      for (const k of keys)
-        out[k] = merge(k, stored[k], incoming[k], KEEP[k] || KEEP.weekly_all);
+      const by_key = {};
+      const rejected_by = { unsyncable_key: 0, bad_shape: 0, duplicate: 0, expired: 0 };
+
+      // Keys the client sent that aren't on the whitelist never reach merge() at all —
+      // count them here or they'd vanish from the diagnostic the same way they vanish
+      // from hist.
+      for (const k of incomingKeys) {
+        if (isSyncable(k)) continue;
+        const n = Array.isArray(incoming[k]) ? incoming[k].length : 0;
+        rejected_by.unsyncable_key += n;
+      }
+
+      const keys = new Set([...SYNCABLE_BASE, ...Object.keys(stored), ...incomingKeys].filter(isSyncable));
+      let received = rejected_by.unsyncable_key, accepted = 0;
+      for (const k of keys) {
+        const { out: mergedArr, stats } = merge(k, stored[k], incoming[k], KEEP[k] || KEEP.weekly_all);
+        out[k] = mergedArr;
+        by_key[k] = stats;
+        received += stats.received;
+        accepted += stats.accepted;
+        rejected_by.bad_shape += stats.malformed;
+        rejected_by.duplicate += stats.duplicate;
+        rejected_by.expired += stats.expired;
+      }
+
+      const sync = {
+        received, accepted,
+        rejected: rejected_by.unsyncable_key + rejected_by.bad_shape + rejected_by.duplicate + rejected_by.expired,
+        rejected_by, by_key,
+      };
+
       await env.HIST.put('hist', JSON.stringify(out));
-      return Response.json({ hist: out }, { headers: CORS });
+      return Response.json({ hist: out, sync }, { headers: CORS });
     }
     return new Response('method not allowed', { status: 405, headers: CORS });
   },
