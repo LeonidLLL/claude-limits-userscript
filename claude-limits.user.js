@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.5
+// @version      29.6
 // @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting and SVG charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.5';
+  const VERSION = '29.6';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -40,6 +40,7 @@
   if (!S.hist) S.hist = {};
   if (!S.ui) S.ui = { open: false, pos: null };
   if (!S.sync) S.sync = { url: null, token: null, lastOk: null, ok: null };
+  if (!S.ui.mode) S.ui.mode = 'compact';   // compact stays the default — it's what works on a phone
   // first run: follow the browser language, then remember whatever the user picks
   if (!S.ui.lang) S.ui.lang = /^ru\b/i.test(navigator.language || '') ? 'ru' : 'en';
 
@@ -71,6 +72,8 @@
       tipRefresh: 'Refresh', tipCollapse: 'Collapse', tipLang: 'Switch language',
       tipSync: 'Sync settings', syncUrlPrompt: 'Sync URL (blank to disable):', syncTokenPrompt: 'Sync token:',
       syncOffline: 'sync: offline', syncAgo: t => 'sync: ' + t,
+      tipMode: 'Click to switch view: compact / expanded / wide',
+      colSession: '5-hour window', colWeek: 'Week', colForecast: 'Forecast', colCredits: 'Credits',
       tipBadge: '5-hour window — click for detail, drag to move',
       noOrg: 'orgId not detected — open any chat', error: e => 'Error: ' + e,
       days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
@@ -103,6 +106,8 @@
       tipRefresh: 'Обновить', tipCollapse: 'Свернуть', tipLang: 'Переключить язык',
       tipSync: 'Настройки синхронизации', syncUrlPrompt: 'URL синхронизации (пусто — выключить):', syncTokenPrompt: 'Токен синхронизации:',
       syncOffline: 'синхр.: офлайн', syncAgo: t => 'синхр.: ' + t,
+      tipMode: 'Клик — переключить вид: compact / expanded / wide',
+      colSession: 'Окно 5ч', colWeek: 'Неделя', colForecast: 'Прогноз', colCredits: 'Кредиты',
       tipBadge: '5-часовое окно — клик: детали, перетаскивание: переместить',
       noOrg: 'orgId не определён — открой любой чат', error: e => 'Ошибка: ' + e,
       days: ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'],
@@ -597,10 +602,15 @@
 #clt-badge .t{font-size:13px;font-weight:700;letter-spacing:.2px;white-space:nowrap;}
 #clt-badge.spin img{animation:cltrot 1s linear infinite;}
 @keyframes cltrot{to{transform:rotate(360deg)}}
-#clt-panel{position:absolute;right:0;bottom:44px;width:320px;background:#17171c;border:1px solid #33333c;border-radius:16px;padding:12px 14px 9px;box-shadow:0 10px 34px rgba(0,0,0,.6);color:#e8e8ee;display:none;}
+#clt-panel{position:absolute;right:0;bottom:44px;width:268px;max-width:calc(100vw - 32px);background:#17171c;border:1px solid #33333c;border-radius:16px;padding:12px 14px 9px;box-shadow:0 10px 34px rgba(0,0,0,.6);color:#e8e8ee;display:none;}
 #clt-panel.open{display:block;}
 .clt-hd{display:flex;align-items:center;gap:6px;margin-bottom:10px;}
-.clt-hd .t{font-size:11px;font-weight:600;color:#8b8b94;flex:1;letter-spacing:.3px;text-transform:uppercase;}
+.clt-hd .t{font-size:11px;font-weight:600;color:#8b8b94;flex:1;letter-spacing:.3px;text-transform:uppercase;cursor:pointer;user-select:none;}
+.clt-hd .t:hover{color:#c9c9d2;}
+.clt-wide{display:grid;gap:16px;}
+.clt-col{min-width:0;}
+.clt-col .clt-row:first-child{border-top:none;padding-top:0;}
+.clt-col-hd{font-size:10px;font-weight:600;color:#6f6f78;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;}
 .clt-hd button{background:none;border:none;color:#8b8b94;cursor:pointer;font-size:13px;padding:2px 5px;border-radius:6px;line-height:1;}
 .clt-hd button:hover{background:#26262d;color:#fff;}
 .clt-hd button.lang{font-size:9.5px;font-weight:700;letter-spacing:.5px;border:1px solid #3a3a44;padding:2px 5px;}
@@ -792,6 +802,138 @@
 
   function setBadgeSpin(on) { if (badge) badge.classList.toggle('spin', on); }
 
+  // <700px cannot fit expanded/wide's minimum content — fall back regardless of
+  // what the user picked, per stage-5 breakpoints
+  function effectiveMode() {
+    const vw = document.documentElement.clientWidth || window.innerWidth || 1200;
+    return vw < 700 ? 'compact' : S.ui.mode;
+  }
+  function cycleMode() {
+    const order = ['compact', 'expanded', 'wide'];
+    S.ui.mode = order[(order.indexOf(S.ui.mode) + 1) % order.length];
+    saveState(); render();
+  }
+
+  function headerHtml() {
+    return `<div class="clt-hd"><span class="t" id="clt-t" title="${L().tipMode}">Claude Limits</span>
+      <button id="clt-l" class="lang" title="${L().tipLang}">${L().code}</button>
+      <button id="clt-s" title="${L().tipSync}">⇄</button>
+      <button id="clt-r" title="${L().tipRefresh}">↻</button>
+      <button id="clt-x" title="${L().tipCollapse}">✕</button></div>`;
+  }
+
+  function heroHtml(sess, withChart) {
+    if (!sess) return `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">${L().noData}</div>
+      <div class="sub">${L().pressRefresh}</div></div></div>`;
+    const p = pace(sess), col = COLORS[p.status];
+    if (sess.idle) {
+      return `<div class="clt-hero">
+        <div class="ring">${ring(0, COLORS.idle)}<div class="rpct" style="color:${COLORS.idle}">0%</div></div>
+        <div><div class="lbl">${L().hero}</div><div class="big" style="color:${COLORS.idle}">${L().notStarted}</div>
+        <div class="sub">${L().beginsWith}</div></div></div>`;
+    }
+    let html = `<div class="clt-hero">
+      <div class="ring">${ring(sess.pct, col)}<div class="rpct" style="color:${col}">${Math.round(sess.pct)}%</div></div>
+      <div><div class="lbl">${L().hero}</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
+      <div class="sub">${L().resetsAt(fmtTime(sess.resetAt))}</div></div></div>`;
+    if (withChart) html += sessionChartSvg(sess, col);
+    return html;
+  }
+
+  function weeklyRowHtml(it, sess, opts) {
+    const p = pace(it, sess), col = COLORS[p.status];
+    const plan = planPct(it);
+    let normLine = '';
+    if (opts.norm && p.norm != null) {
+      normLine = L().normBase(p.norm.toFixed(2), Math.floor(p.activeRemaining / 5));
+      if (p.forecastReady && p.curPace != null) normLine += L().paceSuffix(p.curPace.toFixed(2));
+    }
+    return `<div class="clt-row">
+      <div class="l1"><span class="n">${esc(it.title)}</span>${planTag(it.pct, plan, '%')}<span class="v" style="color:${col}">${Math.round(it.pct)}%</span></div>
+      <div class="clt-bar"><i style="width:${Math.min(100, it.pct)}%;background:${col}"></i>${dayTicks()}${planMark(plan)}</div>
+      ${it.resetAt ? `<div class="clt-sub">${L().rowResets(fmtDay(it.resetAt), fmtTime(it.resetAt), fmtDur(it.resetAt - Date.now()))}</div>` : ''}
+      ${normLine ? `<div class="clt-sub">${normLine}</div>` : ''}
+      ${p.note ? `<div class="clt-warn" style="color:${col}">${esc(p.note)}</div>` : ''}
+      ${opts.chart && it.key === 'weekly_all' ? weeklyChartSvg(it) : ''}
+    </div>`;
+  }
+
+  function moneyHtml(sp) {
+    if (!sp && !S.balance) return '';
+    let html = `<div class="clt-row">`;
+    if (sp) {
+      const p = pace(sp), col = COLORS[p.status];
+      const plan = planPct(sp);
+      const planUsd = plan != null ? plan / 100 * sp.money.lim : null;   // what should have been spent by this point
+      html += `<div class="l1"><span class="n">${L().creditsMonth}</span>${planTag(sp.money.used, planUsd, '$')}<span class="v" style="color:${col}">$${sp.money.used.toFixed(2)} / $${sp.money.lim.toFixed(0)}</span></div>
+        <div class="clt-bar"><i style="width:${Math.min(100, sp.pct)}%;background:${col}"></i>${decadeTicks(sp.resetAt, sp.windowMs)}${planMark(plan)}</div>`;
+    }
+    const bits = [];
+    if (S.balance && S.balance.amount != null) bits.push(L().balance(S.balance.amount.toFixed(2)));
+    if (sp) bits.push(L().spendResets(fmtDay(sp.resetAt)));
+    if (bits.length) html += `<div class="clt-sub">${bits.join(' · ')}</div>`;
+
+    // quiet note: how much promo is left and when it expires (part of the balance, not extra)
+    const pl = promoLeft();
+    if (pl != null && pl > 1 && S.promo.expiresAt && S.promo.expiresAt > Date.now()) {
+      html += `<div class="clt-sub">${L().inclPromo(pl.toFixed(2), fmtDay(S.promo.expiresAt))}</div>`;
+    }
+    const pw = promoWarning();
+    if (pw) html += `<div class="clt-warn" style="color:${COLORS.warn}">${L().promoWarn(pw.cap.toFixed(0), pw.left.toFixed(0), fmtDay(S.promo.expiresAt), pw.lost.toFixed(0), pw.need)}</div>`;
+    html += `</div>`;
+    return html;
+  }
+
+  function footerHtml() {
+    const stale = S.lastT && (Date.now() - S.lastT > POLL_MINUTES * 2 * 60e3);
+    const syncBit = !S.sync.url ? '' : (S.sync.ok === false)
+      ? `<span style="color:${COLORS.warn}">${L().syncOffline}</span>`
+      : (S.sync.lastOk ? `<span style="color:#5f5f68">${L().syncAgo(fmtAgo(Date.now() - S.sync.lastOk))}</span>` : '');
+    return `<div class="clt-ft">
+      <a href="/settings/usage" target="_blank">${L().fullDetail}</a><span class="sp"></span>
+      ${syncBit}
+      <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : L().noData}</span>
+      <span>v${VERSION}</span></div>`;
+  }
+
+  // compact: v29.1 content, unchanged — no norm line, no charts
+  function compactBody(items, sess) {
+    let html = heroHtml(sess, false);
+    for (const it of items) {
+      if (it.key === 'session' || it.key === 'spend') continue;
+      html += weeklyRowHtml(it, sess, { norm: false, chart: false });
+    }
+    html += moneyHtml(items.find(i => i.key === 'spend'));
+    return html;
+  }
+
+  // expanded: today's vertical stack — norm line + inline weekly chart + session chart
+  function expandedBody(items, sess) {
+    let html = heroHtml(sess, true);
+    for (const it of items) {
+      if (it.key === 'session' || it.key === 'spend') continue;
+      html += weeklyRowHtml(it, sess, { norm: true, chart: true });
+    }
+    html += moneyHtml(items.find(i => i.key === 'spend'));
+    return html;
+  }
+
+  // wide: horizontal columns per TZ 4.2 — 5h window / Week (all weekly-style rows,
+  // norm shown, chart pulled out) / Forecast (the weekly_all chart, given room to breathe)
+  // / Credits
+  function wideBody(items, sess, cols) {
+    const weeklyAll = items.find(i => i.key === 'weekly_all');
+    const weekRows = items.filter(i => i.key !== 'session' && i.key !== 'spend')
+      .map(it => weeklyRowHtml(it, sess, { norm: true, chart: false })).join('');
+    const forecast = weeklyAll ? weeklyChartSvg(weeklyAll) : `<div class="clt-sub">${L().noData}</div>`;
+    return `<div class="clt-wide" style="grid-template-columns:repeat(${cols},1fr)">
+      <div class="clt-col"><div class="clt-col-hd">${L().colSession}</div>${heroHtml(sess, true)}</div>
+      <div class="clt-col"><div class="clt-col-hd">${L().colWeek}</div>${weekRows}</div>
+      <div class="clt-col"><div class="clt-col-hd">${L().colForecast}</div>${forecast}</div>
+      <div class="clt-col"><div class="clt-col-hd">${L().colCredits}</div>${moneyHtml(items.find(i => i.key === 'spend'))}</div>
+    </div>`;
+  }
+
   function render() {
     if (!badge) return;
     const items = S.last ? extract(S.last) : [];
@@ -813,92 +955,26 @@
     panel.classList.toggle('open', !!S.ui.open);
     if (!S.ui.open) return;
 
-    let html = `<div class="clt-hd"><span class="t">Claude Limits</span>
-      <button id="clt-l" class="lang" title="${L().tipLang}">${L().code}</button>
-      <button id="clt-s" title="${L().tipSync}">⇄</button>
-      <button id="clt-r" title="${L().tipRefresh}">↻</button>
-      <button id="clt-x" title="${L().tipCollapse}">✕</button></div>`;
-
-    /* --- hero --- */
-    if (sess) {
-      const p = pace(sess), col = COLORS[p.status];
-      if (sess.idle) {
-        html += `<div class="clt-hero">
-          <div class="ring">${ring(0, COLORS.idle)}<div class="rpct" style="color:${COLORS.idle}">0%</div></div>
-          <div><div class="lbl">${L().hero}</div><div class="big" style="color:${COLORS.idle}">${L().notStarted}</div>
-          <div class="sub">${L().beginsWith}</div></div></div>`;
-      } else {
-        html += `<div class="clt-hero">
-          <div class="ring">${ring(sess.pct, col)}<div class="rpct" style="color:${col}">${Math.round(sess.pct)}%</div></div>
-          <div><div class="lbl">${L().hero}</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
-          <div class="sub">${L().resetsAt(fmtTime(sess.resetAt))}</div></div></div>`;
-        html += sessionChartSvg(sess, col);
-      }
+    const mode = effectiveMode();
+    let width, body;
+    if (mode === 'wide') {
+      const vw = document.documentElement.clientWidth || window.innerWidth || 1200;
+      width = Math.min(1100, Math.max(700, vw - 32));
+      body = wideBody(items, sess, vw >= 1100 ? 4 : 2);   // breakpoint is viewport width, not panel width
+    } else if (mode === 'expanded') {
+      width = 420;
+      body = expandedBody(items, sess);
     } else {
-      html += `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">${L().noData}</div>
-        <div class="sub">${L().pressRefresh}</div></div></div>`;
+      width = 268;
+      body = compactBody(items, sess);
     }
+    panel.style.width = width + 'px';
+    panel.innerHTML = headerHtml() + body + footerHtml();
 
-    /* --- weekly rows --- */
-    for (const it of items) {
-      if (it.key === 'session' || it.key === 'spend') continue;
-      const p = pace(it, sess), col = COLORS[p.status];
-      const plan = planPct(it);
-      let normLine = '';
-      if (p.norm != null) {
-        normLine = L().normBase(p.norm.toFixed(2), Math.floor(p.activeRemaining / 5));
-        if (p.forecastReady && p.curPace != null) normLine += L().paceSuffix(p.curPace.toFixed(2));
-      }
-      html += `<div class="clt-row">
-        <div class="l1"><span class="n">${esc(it.title)}</span>${planTag(it.pct, plan, '%')}<span class="v" style="color:${col}">${Math.round(it.pct)}%</span></div>
-        <div class="clt-bar"><i style="width:${Math.min(100, it.pct)}%;background:${col}"></i>${dayTicks()}${planMark(plan)}</div>
-        ${it.resetAt ? `<div class="clt-sub">${L().rowResets(fmtDay(it.resetAt), fmtTime(it.resetAt), fmtDur(it.resetAt - Date.now()))}</div>` : ''}
-        ${normLine ? `<div class="clt-sub">${normLine}</div>` : ''}
-        ${p.note ? `<div class="clt-warn" style="color:${col}">${esc(p.note)}</div>` : ''}
-        ${it.key === 'weekly_all' ? weeklyChartSvg(it) : ''}
-      </div>`;
-    }
-
-    /* --- money --- */
-    const sp = items.find(i => i.key === 'spend');
-    if (sp || S.balance) {
-      html += `<div class="clt-row">`;
-      if (sp) {
-        const p = pace(sp), col = COLORS[p.status];
-        const plan = planPct(sp);
-        const planUsd = plan != null ? plan / 100 * sp.money.lim : null;   // what should have been spent by this point
-        html += `<div class="l1"><span class="n">${L().creditsMonth}</span>${planTag(sp.money.used, planUsd, '$')}<span class="v" style="color:${col}">$${sp.money.used.toFixed(2)} / $${sp.money.lim.toFixed(0)}</span></div>
-          <div class="clt-bar"><i style="width:${Math.min(100, sp.pct)}%;background:${col}"></i>${decadeTicks(sp.resetAt, sp.windowMs)}${planMark(plan)}</div>`;
-      }
-      const bits = [];
-      if (S.balance && S.balance.amount != null) bits.push(L().balance(S.balance.amount.toFixed(2)));
-      if (sp) bits.push(L().spendResets(fmtDay(sp.resetAt)));
-      if (bits.length) html += `<div class="clt-sub">${bits.join(' · ')}</div>`;
-
-      // quiet note: how much promo is left and when it expires (part of the balance, not extra)
-      const pl = promoLeft();
-      if (pl != null && pl > 1 && S.promo.expiresAt && S.promo.expiresAt > Date.now()) {
-        html += `<div class="clt-sub">${L().inclPromo(pl.toFixed(2), fmtDay(S.promo.expiresAt))}</div>`;
-      }
-      const pw = promoWarning();
-      if (pw) html += `<div class="clt-warn" style="color:${COLORS.warn}">${L().promoWarn(pw.cap.toFixed(0), pw.left.toFixed(0), fmtDay(S.promo.expiresAt), pw.lost.toFixed(0), pw.need)}</div>`;
-      html += `</div>`;
-    }
-
-    const stale = S.lastT && (Date.now() - S.lastT > POLL_MINUTES * 2 * 60e3);
-    const syncBit = !S.sync.url ? '' : (S.sync.ok === false)
-      ? `<span style="color:${COLORS.warn}">${L().syncOffline}</span>`
-      : (S.sync.lastOk ? `<span style="color:#5f5f68">${L().syncAgo(fmtAgo(Date.now() - S.sync.lastOk))}</span>` : '');
-    html += `<div class="clt-ft">
-      <a href="/settings/usage" target="_blank">${L().fullDetail}</a><span class="sp"></span>
-      ${syncBit}
-      <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : L().noData}</span>
-      <span>v${VERSION}</span></div>`;
-
-    panel.innerHTML = html;
-    const rb = panel.querySelector('#clt-r'), xb = panel.querySelector('#clt-x'), lb = panel.querySelector('#clt-l'), sb = panel.querySelector('#clt-s');
+    const rb = panel.querySelector('#clt-r'), xb = panel.querySelector('#clt-x'), lb = panel.querySelector('#clt-l'), sb = panel.querySelector('#clt-s'), tb = panel.querySelector('#clt-t');
     if (lb) lb.onclick = toggleLang;
     if (sb) sb.onclick = configureSync;
+    if (tb) tb.onclick = cycleMode;
     if (rb) rb.onclick = () => poll(true);
     if (xb) xb.onclick = () => { S.ui.open = false; saveState(); render(); };
   }
@@ -922,6 +998,12 @@
     setInterval(render, 20e3);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && Date.now() - S.lastT > 2 * 60e3) poll(false);
+    });
+    // re-check the wide/expanded/compact breakpoints on rotate/resize
+    let resizeT = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeT);
+      resizeT = setTimeout(render, 150);
     });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
