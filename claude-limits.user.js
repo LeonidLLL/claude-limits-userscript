@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      30.0
+// @version      30.1
 // @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting, SVG charts, three view modes, and optional cross-device sync. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '30.0';
+  const VERSION = '30.1';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -99,6 +99,7 @@
       syncSave: 'Save', syncClear: 'Disable', syncCancel: 'Cancel',
       syncOffline: 'sync: offline', syncAgo: t => 'sync: ' + t,
       storageWarn: '⚠ storage', storageWarnTip: 'localStorage quota is tight — oldest history was trimmed to keep saving',
+      rateLimited: t => 'rate-limited — retrying ' + t, paused: t => 'paused · retry ' + t,
       tipMode: 'Click to switch view: compact / expanded / wide',
       colSession: '5-hour window', colWeek: 'Week', colForecast: 'Forecast', colCredits: 'Credits',
       tipBadge: '5-hour window — click for detail, drag to move',
@@ -135,6 +136,7 @@
       syncSave: 'Сохранить', syncClear: 'Выключить', syncCancel: 'Отмена',
       syncOffline: 'синхр.: офлайн', syncAgo: t => 'синхр.: ' + t,
       storageWarn: '⚠ память', storageWarnTip: 'локальное хранилище почти заполнено — старая история обрезана, чтобы сохранение продолжало работать',
+      rateLimited: t => 'ограничение частоты — повтор ' + t, paused: t => 'пауза · повтор ' + t,
       tipMode: 'Клик — переключить вид: compact / expanded / wide',
       colSession: 'Окно 5ч', colWeek: 'Неделя', colForecast: 'Прогноз', colCredits: 'Кредиты',
       tipBadge: '5-часовое окно — клик: детали, перетаскивание: переместить',
@@ -176,15 +178,52 @@
   }
 
   let polling = false;
+  // In-memory only, deliberately — a paused state shouldn't survive a reload. If the
+  // tab reopens, it should just try again rather than resume a stale backoff.
+  let rateLimit = { until: 0, backoffMs: 0 };
+  const BACKOFF_BASE_MS = POLL_MINUTES * 60e3;
+  const BACKOFF_MAX_MS = 15 * 60e3;
+
+  // Retry-After is either delta-seconds ("120") or an HTTP-date. Anything that parses
+  // as neither returns null and falls through to our own exponential backoff.
+  function parseRetryAfter(v) {
+    if (!v) return null;
+    const s = v.trim();
+    if (/^\d+$/.test(s)) return parseInt(s, 10) * 1000;
+    const t = Date.parse(s);
+    return isFinite(t) ? Math.max(0, t - Date.now()) : null;
+  }
+  function scheduleBackoff(retryAfterMs) {
+    let delay;
+    if (retryAfterMs != null) {
+      delay = Math.min(retryAfterMs, BACKOFF_MAX_MS);
+      rateLimit.backoffMs = 0; // server gave an authoritative delay — our own ladder resets
+    } else {
+      rateLimit.backoffMs = Math.min(rateLimit.backoffMs ? rateLimit.backoffMs * 2 : BACKOFF_BASE_MS, BACKOFF_MAX_MS);
+      delay = rateLimit.backoffMs;
+    }
+    rateLimit.until = Date.now() + delay;
+  }
+
   async function poll(manual) {
     if (polling) return;
+    if (Date.now() < rateLimit.until) {
+      if (manual) toast(L().rateLimited(fmtTime(rateLimit.until)));
+      return;
+    }
     polling = true; setBadgeSpin(true); scanDOM();
     try {
       const org = detectOrg();
       if (!org) { if (manual) toast(L().noOrg); polling = false; setBadgeSpin(false); return; }
       const r = await origFetch(`/api/organizations/${org}/usage`, { headers: { accept: 'application/json' }, credentials: 'include' });
-      if (r.ok) ingest(await r.json());
-      else if (manual) toast('usage: HTTP ' + r.status);
+      if (r.ok) {
+        rateLimit = { until: 0, backoffMs: 0 };
+        ingest(await r.json());
+      } else if (r.status === 429) {
+        scheduleBackoff(parseRetryAfter(r.headers.get('retry-after')));
+        if (manual) toast('usage: HTTP 429');
+        render();
+      } else if (manual) toast('usage: HTTP ' + r.status);
     } catch (e) { if (manual) toast(L().error(e.message)); }
     polling = false; setBadgeSpin(false);
   }
@@ -983,8 +1022,10 @@
       ? `<span style="color:${COLORS.warn}">${L().syncOffline}</span>`
       : (S.sync.lastOk ? `<span style="color:#5f5f68">${L().syncAgo(fmtAgo(Date.now() - S.sync.lastOk))}</span>` : '');
     const storBit = S.storageWarn ? `<span style="color:${COLORS.warn}" title="${L().storageWarnTip}">${L().storageWarn}</span>` : '';
+    const pauseBit = Date.now() < rateLimit.until ? `<span style="color:${COLORS.warn}">${L().paused(fmtTime(rateLimit.until))}</span>` : '';
     return `<div class="clt-ft">
       <a href="/settings/usage" target="_blank">${L().fullDetail}</a><span class="sp"></span>
+      ${pauseBit}
       ${storBit}
       ${syncBit}
       <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : L().noData}</span>
