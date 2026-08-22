@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.4
+// @version      29.5
 // @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting and SVG charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.4';
+  const VERSION = '29.5';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -65,6 +65,8 @@
       runsOut: (day, time) => 'runs out ' + day + ' ~' + time + ', short of the reset',
       paceAhead: r => 'pace ' + r + '× the norm',
       expiresUnused: (pct, day, time) => pct + '% left will expire ' + day + ' ' + time,
+      normBase: (norm, windows) => 'norm ' + norm + '%/active-h · ~' + windows + ' 5h windows left',
+      paceSuffix: p => ' · pace ' + p + '%/active-h',
       fullDetail: 'Full detail → Usage',
       tipRefresh: 'Refresh', tipCollapse: 'Collapse', tipLang: 'Switch language',
       tipSync: 'Sync settings', syncUrlPrompt: 'Sync URL (blank to disable):', syncTokenPrompt: 'Sync token:',
@@ -95,6 +97,8 @@
       runsOut: (day, time) => 'кончится ' + day + ' ~' + time + ', до сброса не хватит',
       paceAhead: r => 'темп ' + r + '× от нормы',
       expiresUnused: (pct, day, time) => 'остаток ' + pct + '% сгорит ' + day + ' ' + time,
+      normBase: (norm, windows) => 'норма ' + norm + '%/акт.ч · ~' + windows + ' окон по 5ч',
+      paceSuffix: p => ' · темп ' + p + '%/акт.ч',
       fullDetail: 'Подробности → Usage',
       tipRefresh: 'Обновить', tipCollapse: 'Свернуть', tipLang: 'Переключить язык',
       tipSync: 'Настройки синхронизации', syncUrlPrompt: 'URL синхронизации (пусто — выключить):', syncTokenPrompt: 'Токен синхронизации:',
@@ -497,9 +501,9 @@
     const fracElapsed = it.windowMs ? elapsed / it.windowMs : 0;
     const hist = S.hist[it.key] || [];
     const historyDepthMs = hist.length ? now - hist[0].t : 0;
-    if (fracElapsed < AVG_RATE_GATE_FRAC && historyDepthMs < MIN_HISTORY_FOR_FORECAST) {
-      return { status: 'ok', note: '' };
-    }
+    // gates the ALARM only — norm/pace are still worth showing during the uncertain
+    // window, per TZ 3.5: "прогноз скрыт, показывать только факт и норму"
+    const forecastReady = fracElapsed >= AVG_RATE_GATE_FRAC || historyDepthMs >= MIN_HISTORY_FOR_FORECAST;
 
     const blocked = blockedActiveHours(sess, it.resetAt);
     const activeRemaining = Math.max(0, activeHours(now, it.resetAt) - blocked);
@@ -507,16 +511,17 @@
       return { status: 'ok', note: L().expiresUnused(Math.round(100 - it.pct), fmtDay(it.resetAt), fmtTime(it.resetAt)) };
     }
 
-    const norm = (100 - it.pct) / activeRemaining;         // % needed per active hour to land on the limit
-    const paceStart = activeHoursAgo(now, 3);               // pace over the last 3 *active* hours, not wall-clock
+    const norm = (100 - it.pct) / activeRemaining;          // % needed per active hour to land on the limit
+    const paceStart = activeHoursAgo(now, 3);                // pace over the last 3 *active* hours, not wall-clock
     let pastPct = null;
     for (const p of hist) { if (p.t <= paceStart) pastPct = p.p; else break; }
     const curPace = (hist.length && hist[0].t <= paceStart && pastPct != null) ? (it.pct - pastPct) / 3 : null;
+    const ratio = (curPace != null && norm > 0) ? curPace / norm : null;
+    const info = { norm, curPace, ratio, activeRemaining, forecastReady };
 
-    if (curPace == null || norm <= 0) return { status: 'ok', note: '' };
-
-    const ratio = curPace / norm;
-    if (ratio < 1.15) return { status: 'ok', note: '' };
+    if (!forecastReady || ratio == null || ratio < 1.15) {
+      return Object.assign({ status: 'ok', note: '' }, info);
+    }
 
     const proj = it.pct + curPace * activeRemaining;        // % at reset if the current active-hour pace holds
     if (ratio >= 1.8 && proj >= 100) {
@@ -524,9 +529,9 @@
       // over what's left — good enough for a "roughly when" readout, not exact
       const calRate = curPace * (activeRemaining / left);
       const d = calRate > 0 ? now + (100 - it.pct) / calRate : it.resetAt;
-      return { status: 'bad', note: L().runsOut(fmtDay(d), fmtTime(d)) };
+      return Object.assign({ status: 'bad', note: L().runsOut(fmtDay(d), fmtTime(d)) }, info);
     }
-    return { status: 'warn', note: L().paceAhead(ratio.toFixed(1)) };
+    return Object.assign({ status: 'warn', note: L().paceAhead(ratio.toFixed(1)) }, info);
   }
 
   /* ================= PROMO ================= */
@@ -839,10 +844,16 @@
       if (it.key === 'session' || it.key === 'spend') continue;
       const p = pace(it, sess), col = COLORS[p.status];
       const plan = planPct(it);
+      let normLine = '';
+      if (p.norm != null) {
+        normLine = L().normBase(p.norm.toFixed(2), Math.floor(p.activeRemaining / 5));
+        if (p.forecastReady && p.curPace != null) normLine += L().paceSuffix(p.curPace.toFixed(2));
+      }
       html += `<div class="clt-row">
         <div class="l1"><span class="n">${esc(it.title)}</span>${planTag(it.pct, plan, '%')}<span class="v" style="color:${col}">${Math.round(it.pct)}%</span></div>
         <div class="clt-bar"><i style="width:${Math.min(100, it.pct)}%;background:${col}"></i>${dayTicks()}${planMark(plan)}</div>
         ${it.resetAt ? `<div class="clt-sub">${L().rowResets(fmtDay(it.resetAt), fmtTime(it.resetAt), fmtDur(it.resetAt - Date.now()))}</div>` : ''}
+        ${normLine ? `<div class="clt-sub">${normLine}</div>` : ''}
         ${p.note ? `<div class="clt-warn" style="color:${col}">${esc(p.note)}</div>` : ''}
         ${it.key === 'weekly_all' ? weeklyChartSvg(it) : ''}
       </div>`;
