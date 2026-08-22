@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.6
+// @version      29.7
 // @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting and SVG charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.6';
+  const VERSION = '29.7';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -268,23 +268,43 @@
     return body;
   }
 
+  // Only accept well-formed {t,p} point arrays for known-shaped keys. A malformed or
+  // unexpected server response must never corrupt S.hist — that would break every
+  // subsequent render() (pace()/charts assume this shape) instead of just this one sync.
+  function sanitizeHist(hist) {
+    const out = {};
+    for (const k in hist) {
+      if (k === 'blocks') continue;
+      const arr = hist[k];
+      if (!Array.isArray(arr)) continue;
+      out[k] = arr.filter(p => p && typeof p.t === 'number' && typeof p.p === 'number');
+    }
+    return out;
+  }
+
   async function syncNow() {
     if (!S.sync || !S.sync.url || !S.sync.token) return;
+    const ac = new AbortController();
+    const abortT = setTimeout(() => ac.abort(), 10000); // a silently-dropped connection must not hang indefinitely
     try {
       const r = await origFetch(syncUrl(), {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: 'Bearer ' + S.sync.token },
-        body: syncPayload()
+        body: syncPayload(),
+        signal: ac.signal
       });
       if (!r.ok) { S.sync.ok = false; saveState(); render(); return; }
       const data = await r.json();
       if (!data || typeof data.hist !== 'object') { S.sync.ok = false; saveState(); render(); return; }
-      S.hist = Object.assign({}, data.hist, S.hist.blocks ? { blocks: S.hist.blocks } : {});
+      S.hist = Object.assign(sanitizeHist(data.hist), S.hist.blocks ? { blocks: S.hist.blocks } : {});
       S.sync.ok = true; S.sync.lastOk = Date.now();
       saveState(); render();
     } catch (e) {
-      // network error — stay silent, keep working on local data; footer shows "sync: offline"
+      // network error, timeout, or bad JSON — stay silent, keep working on local data;
+      // footer shows "sync: offline"
       S.sync.ok = false; saveState(); render();
+    } finally {
+      clearTimeout(abortT);
     }
   }
 
@@ -934,8 +954,20 @@
     </div>`;
   }
 
+  // One bad data point (malformed history, an unexpected sync response) must not
+  // wedge the widget into a permanently stale state — catch, show something honest,
+  // keep the poll/sync timers running so it can recover on its own next tick.
   function render() {
     if (!badge) return;
+    try {
+      renderInner();
+    } catch (e) {
+      badgeTxt.textContent = '⚠'; badgeTxt.style.color = COLORS.warn;
+      if (panel) panel.classList.remove('open');
+    }
+  }
+
+  function renderInner() {
     const items = S.last ? extract(S.last) : [];
     const sess = items.find(i => i.key === 'session');
 
