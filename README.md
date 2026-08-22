@@ -105,6 +105,53 @@ source. Nothing is sent anywhere *unless you configure sync yourself*, in which
 case history (not org ID, not balance, not raw API responses) is sent to the
 endpoint you provided, and only there.
 
+## Testing the 8-hour leak scenario
+
+Not automated — this is a manual DevTools pass, done once in a while rather than on
+every change. Reproduce it like this:
+
+1. Open claude.ai with the script active, open DevTools → **Memory**.
+2. Take a heap snapshot right after the badge appears (baseline).
+3. Leave the tab open for ~8 hours — normal use is fine, it doesn't need to be idle.
+   The panel only needs to be opened/closed a few times over that period; it doesn't
+   need to stay open.
+4. Take another snapshot (or a few, spaced out) and compare against the baseline —
+   the snapshot comparison view groups by constructor and shows retained-size deltas
+   directly.
+
+**What should stay flat:**
+
+- **DOM node count** (Memory panel's summary, or the Elements panel's node counter).
+  `render()` always does `panel.innerHTML = ...` — a full wholesale replacement, not
+  an append — so old nodes should be released every render (every 20s, plus after
+  every poll/sync). If the node count trends upward over the 8 hours instead of
+  oscillating around a constant, something is retaining old panel content.
+- **Detached DOM tree count**, in the snapshot's summary view. This is the specific
+  signal for "nodes were removed from the document but something still references
+  them" — normally a closure holding an old element. Since every `onclick` handler
+  is reassigned fresh on each `render()` and nothing stores element references
+  outside of `render()`'s own local scope, this should sit at zero.
+- **Event listener count** (Elements panel → Event Listeners, on `window` and
+  `document`). Everything is registered once in `start()`/`buildUI()` — poll and
+  sync intervals, `visibilitychange`, `resize`, and the badge's drag handlers
+  (`mousedown`/`mousemove`/`mouseup`) — never inside `render()`. This count should
+  be identical at hour 0 and hour 8.
+- **Active timers**: exactly three `setInterval`s (poll every 5 min, sync every 15
+  min, render every 20s) plus the debounced `resize` handler's single in-flight
+  `setTimeout` at most. Nothing in the code path creates more of these over time.
+
+**What's expected to grow, and isn't a leak:** the JS heap size itself, slowly and
+boundedly — `S.hist.*` (session, weekly_all, spend, promo_left, pairs, blocks, and
+any active `slot_*` sub-limits) only ever grows within a single 8-hour window, since
+the `KEEP` retention windows (30–90 days) don't start trimming anything that
+recently. Each stored point is a tiny `{t,p}` (or `{t,ds,dw}`, or `{start,end}`)
+object, so even the busiest key adding a point every 5 minutes for 8 hours is under
+a hundred entries — this should read as a small, linear, unremarkable increase, not
+an accelerating one. If total heap growth over 8 hours looks disproportionate to
+that (megabytes rather than tens of kilobytes), look at DOM/listener/timer counts
+first — a genuine `S.hist` sizing problem would show up in `localStorage` usage
+(and the `⚠ storage` footer indicator) long before it shows up as a memory leak.
+
 ## Compatibility
 
 Chrome + Tampermonkey on Windows, and Firefox Android + Tampermonkey (tested in
