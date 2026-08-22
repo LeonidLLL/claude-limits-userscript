@@ -24,6 +24,8 @@
   const SESSION_WINDOW_MS = 5 * 3600e3;
   const WEEK_WINDOW_MS = 7 * 86400e3;
   const DEDUP_MS = 20 * 60e3;
+  const AVG_RATE_GATE_FRAC = 0.20;      // don't trust avgRate before this fraction of the window has elapsed
+  const PRIOR_MIX_FRAC = 0.50;          // full weight on the extrapolation once this fraction has elapsed
   const KEEP = { session: 30 * 86400e3, weekly: 90 * 86400e3, spend: 62 * 86400e3, promo_left: 62 * 86400e3 };
   const ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAFs2lUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4KPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iWE1QIENvcmUgNS41LjAiPgogPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4KICA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIgogICAgeG1sbnM6ZXhpZj0iaHR0cDovL25zLmFkb2JlLmNvbS9leGlmLzEuMC8iCiAgICB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iCiAgICB4bWxuczp0aWZmPSJodHRwOi8vbnMuYWRvYmUuY29tL3RpZmYvMS4wLyIKICAgIHhtbG5zOnhtcD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLyIKICAgIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIgogICAgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIKICAgZXhpZjpDb2xvclNwYWNlPSIxIgogICBleGlmOlBpeGVsWERpbWVuc2lvbj0iNjQiCiAgIGV4aWY6UGl4ZWxZRGltZW5zaW9uPSI2NCIKICAgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIKICAgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIgogICB0aWZmOkltYWdlTGVuZ3RoPSI2NCIKICAgdGlmZjpJbWFnZVdpZHRoPSI2NCIKICAgdGlmZjpSZXNvbHV0aW9uVW5pdD0iMiIKICAgdGlmZjpYUmVzb2x1dGlvbj0iNzIvMSIKICAgdGlmZjpZUmVzb2x1dGlvbj0iNzIvMSIKICAgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wNy0yNVQwOTo0MTozNCswMzowMCIKICAgeG1wOk1vZGlmeURhdGU9IjIwMjYtMDctMjVUMDk6NDE6MzQrMDM6MDAiPgogICA8eG1wTU06SGlzdG9yeT4KICAgIDxyZGY6U2VxPgogICAgIDxyZGY6bGkKICAgICAgeG1wTU06YWN0aW9uPSJwcm9kdWNlZCIKICAgICAgeG1wTU06c29mdHdhcmVBZ2VudD0iQWZmaW5pdHkgMy4yLjIiCiAgICAgIHhtcE1NOndoZW49IjIwMjYtMDctMjFUMTc6Mzg6MzcrMDM6MDAiLz4KICAgICA8cmRmOmxpCiAgICAgIHhtcE1NOmFjdGlvbj0icHJvZHVjZWQiCiAgICAgIHhtcE1NOnNvZnR3YXJlQWdlbnQ9IkFmZmluaXR5IDMuMi4yIgogICAgICB4bXBNTTp3aGVuPSIyMDI2LTA3LTIyVDA4OjI3OjEwKzAzOjAwIi8+CiAgICAgPHJkZjpsaQogICAgICBzdEV2dDphY3Rpb249InByb2R1Y2VkIgogICAgICBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZmZpbml0eSAzLjIuMiIKICAgICAgc3RFdnQ6d2hlbj0iMjAyNi0wNy0yNVQwOTo0MTozNCswMzowMCIvPgogICAgPC9yZGY6U2VxPgogICA8L3htcE1NOkhpc3Rvcnk+CiAgPC9yZGY6RGVzY3JpcHRpb24+CiA8L3JkZjpSREY+CjwveDp4bXBtZXRhPgo8P3hwYWNrZXQgZW5kPSJyIj8+aY5d/AAAAYJpQ0NQc1JHQiBJRUM2MTk2Ni0yLjEAACiRdZG7SwNBEIc/4yPigwhaKFgEiVYqPiBoYxHRKKhFPMFXc7nkEiGXHHcREVvBVlAQbXwV+hdoK1gLgqIIYi2WijYazrlEiIiZZXa+/e3OsDsLHiWlGXZFDxjprBUJh/yzc/N+7wteWqjCT5Oq2ebk9KhCSfu4o8yNN11urdLn/rXaWNzWoKxaeEgzrazwmPDEStZ0eVu4SUuqMeFT4U5LLih86+rRAj+7nCjwl8uWEhkGT4OwP/GLo79YS1qGsLycgJFa1n7u476kLp6emZbYJt6KTYQwIenFOCMME6SXQZmDdNFHt6wokd+Tz58iI7mazCarWCyRIEmWTlGXpXpcoi56XEaKVbf/f/tq6/19hep1Iah8cpy3dvBuQW7TcT4PHSd3BOWPcJEu5mcOYOBd9M2iFtgH3zqcXRa16A6cb0Dzg6laal4qF/foOryeQP0cNF5DzUKhZz/7HN+DsiZfdQW7e9Ah532L32MnZ+Qz0pX7AAAACXBIWXMAAAsTAAALEwEAmpwYAAAFr0lEQVR4nO2aaYwURRSAPxRQhICKRBbUSCAUQgS8UVyDgsrihaBUIhjwD3gkZjFLCq9o1IQUh4BBQTEiAkppDGKCghISDHigRpSzBBc1CmqiEF0UkBV/vB5o1+7Z2e6e/UN/f2amjtevqqvee/VqICcnJycnJycnJycn5zikRXM/0BvdGugOnAW0DYr3A7uBncq6g82pT7NMgDe6DzAKuB64EGgV07Qe2AR8ALwDrFHW/V1O3co6Ad7oocBDQGVCEb8ALwHPKOv2ZKZYiLJMgDf6XGAe8saz4C9gBjBFWfdnRjKBMkyAN3ok8tbaZy0b+BrQyrqNWQk8IStBAN7oGuANyjN4gJ7Aem/0jVkJzGwFeKOrgZlN6HII2eP1wKlAhyb2HaGsW9GEPpFkMgHe6BuAt2l8RW0CFgLvAVuUdf+EZHQCBgDDAA2c1oisOuAKZd2mpHpDBhPgje4MbAY6Fmm2C3gAWK6sO1KCzLbAeOBRik/Eh8q6gU1Q93+0TNM5YBbFB/8mME5ZV9ewwhvdG6hX1vlwubJuPzDTG/06sAi4OkLuBmBMYq0DUhlBb/QAJMCJ40Xg9pjBD0VWzhZv9KCozsq6H4GhwGuh4iPIpFcq63YlVP0oab3Ag8RvozXA3UWWfO+g74nA+XEPUNYdAsYCa4HfgFuVdROD8tQktgHe6K7Ad8gAGlIHnKes+yFo2weYC9QCE5R1B73RFcC3yBvtpqzb440+GZiPnBPuUdZtDz2vC9BSWfd9Up2jSGMDRhI9eIBZhcEH1CDhcCXyJhcEA14HHA6FuWM5tq8nAhMKApR1u1PoGkuaLXBtTHk98GyDslVAweVVe6MLh6FtwA6AoOy+oPwwsDKFbiWTZgIuiClfr6z7KVygrFsKKMAi0dy0iH4zkGPyk0APZd2yFLqVTCIb4I1uB/wRU22VdZOL9O2HHHU3AhcHxZ8BfYEqZd3mJDolJakNqChS903hizd6ODAaOd8vVNb9rqz70hs9FXFlBYYB9xYG743ugNiDSuDlLELeOJJOQNsideEExhLgFOA24GlvdC1ytO0Z0W+6N3oC0AbZCgUDO4TGw+LEJJ2AwyW22wxcCvwMvAp8DOxDrPuIBm1XIIHT6cBliDc4A/g0oY4lkXQC9hap6xz6PgjoB2xU1h0A8Ea3AMZF9DsEvB8ETku90Y8gduHzhDqWRFIj2ApZylFxwGJl3Z0x/c4BngN6IbbhCWQ1PYVsl63A+HL5/CgSucEgUVkbUz3YG/0fud7ort7ot4CdyMHmJmXdJwRxgLLuI+BmYDBQ641eFkR+ZSdNHBC3NyuQpR/mYeAWJBs8T1m3LSjviCRDCDzAXOAkYDhyzig7aSZgdZG6mga/twaf+4EX4KgtuBy4MtTu+aANwFcpdCuZNBOwHIi7xKjyRlcVfijr5iBBT6/Q2b8KcXfdvdFDgnYeiRj7K+vmhwV6oy/xRvdPoW8kqTJC3uglwB0x1XuAi+Ly+d7oScDU4Ge1sm52keecjbjQjsDjwDRlXX1SvcOkzQdYjh1yGlIBrApyfVEsQrbRSmBx3AO80T2R3EIXxD5MAdZ6o3skVTpMFjnBBUT79QLbgVFJkpfe6FHIBUtUJFgHTFLWzWuq3DBZ5ARrgOuQNxRFL2CDN3oGMFNZ92tjAr3RA4HHiD9yA7Qj8CBpyCotXoks59aNND2AGM/VSIS3Gzk7dAJ6IF5hONCnhMfOVtZVJ9W5QJYXI6ORnH9clihL5gD3l5Jib4xM7wa90WOQe8G46++01AOTlXXTsxJYjsvRa5CT35kZi94B3KWsW5+l0EwvRwGUdWuQNPcrxLvIprAPCYv7Zj14KP8fJPoiV2IjEavdFL4AFiAZobj0W2qa6y8ybRCXdhWSTO2GRHXtkVWyF4kctwLrgHeVdTubQ7ecnJycnJycnJycnJyc45F/Adu1rpCEx6qoAAAAAElFTkSuQmCC';
 
@@ -340,7 +342,12 @@
     const start = it.resetAt - it.windowMs;
     const elapsed = Math.min(Math.max(now - start, 0), it.windowMs);
     const left = it.resetAt - now;
-    const avgRate = elapsed > 3600e3 ? it.pct / elapsed : null;
+    const fracElapsed = it.windowMs ? elapsed / it.windowMs : 0;
+    // a 1-hour gate is ~0.6% of a weekly window — Monday morning noise blew up into
+    // false "bad" alerts. Gate on window fraction instead, then ease the extrapolation
+    // in against a neutral prior ("lands right at the limit") so the alert doesn't
+    // switch on hard the moment the gate is crossed.
+    const avgRate = fracElapsed > AVG_RATE_GATE_FRAC ? it.pct / elapsed : null;
 
     let recRate = null;
     const rec = (S.hist[it.key] || []).filter(p => p.t >= now - 24 * 3600e3 && p.t >= start);
@@ -348,7 +355,9 @@
       const a = rec[0], b = rec[rec.length - 1];
       if (b.t - a.t >= 2 * 3600e3 && b.p >= a.p) recRate = (b.p - a.p) / (b.t - a.t);
     }
-    const proj = avgRate != null ? it.pct + avgRate * left : null;
+    const rawProj = avgRate != null ? it.pct + avgRate * left : null;
+    const w = Math.min(1, Math.pow(fracElapsed / PRIOR_MIX_FRAC, 2));
+    const proj = rawProj != null ? w * rawProj + (1 - w) * 100 : null;
 
     if (it.pct >= 100) return { status: 'bad', note: L().exhausted(fmtDur(left)) };
     if (avgRate > 0 && proj >= 100) {
