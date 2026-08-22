@@ -1,0 +1,5 @@
+docs/STATUS.md
+docs/TZ-*.md
+*.local.md
+.env
+notes/
