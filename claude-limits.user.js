@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.8
-// @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting and SVG charts. Full detail lives on the Usage page.
+// @version      30.0
+// @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting, SVG charts, three view modes, and optional cross-device sync. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
 // @updateURL    https://raw.githubusercontent.com/LeonidLLL/claude-limits-userscript/main/claude-limits.user.js
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.8';
+  const VERSION = '30.0';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -26,7 +26,7 @@
   const DEDUP_MS = 20 * 60e3;
   const AVG_RATE_GATE_FRAC = 0.20;      // hide the weekly forecast before this fraction of the window has elapsed...
   const MIN_HISTORY_FOR_FORECAST = 14 * 86400e3; // ...unless this much history has already accumulated
-  const KEEP = { session: 30 * 86400e3, weekly: 90 * 86400e3, spend: 62 * 86400e3, promo_left: 62 * 86400e3 };
+  const KEEP = { session: 30 * 86400e3, weekly: 90 * 86400e3, spend: 62 * 86400e3, promo_left: 62 * 86400e3, pairs: 90 * 86400e3 };
   // activity profile — user-specific, not universal. Local time, matches the browser's clock.
   const WORK_START = 7, WORK_END = 21;  // work window, hours
   const WEEKEND_WEIGHT = 0.15;          // Sat/Sun inside the work window count at this weight
@@ -35,8 +35,33 @@
 
   /* ================= STATE ================= */
   function loadState() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch (e) { return {}; } }
-  function saveState() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) {} }
-  const S = Object.assign({ orgId: null, last: null, lastT: 0, hist: {}, ui: { open: false, pos: null }, balance: null, promo: null, sync: null }, loadState());
+
+  function isQuotaError(e) {
+    return !!e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014);
+  }
+  // localStorage quota is shared with claude.ai's own app usage, not ours alone — it can
+  // run out silently. Drop the oldest slice of every history array and retry once before
+  // giving up; either way, the in-memory state (and the running widget) is never lost,
+  // only the persisted copy.
+  function trimHistoryForQuota() {
+    for (const k in S.hist) {
+      const arr = S.hist[k];
+      if (Array.isArray(arr) && arr.length > 20) arr.splice(0, Math.ceil(arr.length * 0.2));
+    }
+  }
+  function saveState() {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(S));
+      S.storageWarn = false;
+    } catch (e) {
+      if (!isQuotaError(e)) { S.storageWarn = true; return; }
+      trimHistoryForQuota();
+      try { localStorage.setItem(LS_KEY, JSON.stringify(S)); S.storageWarn = false; }
+      catch (e2) { S.storageWarn = true; }
+    }
+  }
+
+  const S = Object.assign({ orgId: null, last: null, lastT: 0, hist: {}, ui: { open: false, pos: null }, balance: null, promo: null, sync: null, pairsPrev: null, storageWarn: false }, loadState());
   if (!S.hist) S.hist = {};
   if (!S.ui) S.ui = { open: false, pos: null };
   if (!S.sync) S.sync = { url: null, token: null, lastOk: null, ok: null };
@@ -73,6 +98,7 @@
       tipSync: 'Sync settings', syncUrlPh: 'Sync URL', syncTokenPh: 'Sync token',
       syncSave: 'Save', syncClear: 'Disable', syncCancel: 'Cancel',
       syncOffline: 'sync: offline', syncAgo: t => 'sync: ' + t,
+      storageWarn: '⚠ storage', storageWarnTip: 'localStorage quota is tight — oldest history was trimmed to keep saving',
       tipMode: 'Click to switch view: compact / expanded / wide',
       colSession: '5-hour window', colWeek: 'Week', colForecast: 'Forecast', colCredits: 'Credits',
       tipBadge: '5-hour window — click for detail, drag to move',
@@ -108,6 +134,7 @@
       tipSync: 'Настройки синхронизации', syncUrlPh: 'URL синхронизации', syncTokenPh: 'Токен синхронизации',
       syncSave: 'Сохранить', syncClear: 'Выключить', syncCancel: 'Отмена',
       syncOffline: 'синхр.: офлайн', syncAgo: t => 'синхр.: ' + t,
+      storageWarn: '⚠ память', storageWarnTip: 'локальное хранилище почти заполнено — старая история обрезана, чтобы сохранение продолжало работать',
       tipMode: 'Клик — переключить вид: compact / expanded / wide',
       colSession: 'Окно 5ч', colWeek: 'Неделя', colForecast: 'Прогноз', colCredits: 'Кредиты',
       tipBadge: '5-часовое окно — клик: детали, перетаскивание: переместить',
@@ -175,7 +202,9 @@
     S.last = data; S.lastT = Date.now();
     const items = extract(data);
     for (const it of items) pushHist(it.key, it.pct);
-    recordBlock(items.find(i => i.key === 'session'));
+    const sessItem = items.find(i => i.key === 'session'), weekItem = items.find(i => i.key === 'weekly_all');
+    recordBlock(sessItem);
+    recordPair(sessItem && !sessItem.idle ? sessItem.pct : null, weekItem ? weekItem.pct : null);
     saveState(); render();
   }
 
@@ -249,6 +278,29 @@
     return activeHours(now, Math.min(sess.resetAt, until));
   }
 
+  // Stage 7a: collect raw {t, ds, dw} deltas between successive polls, whenever both the
+  // session and the weekly percentage grew (a session reset makes ds negative and the pair
+  // is skipped — exactly the noise this filter is meant to keep out). No math beyond the
+  // subtraction, no UI — this is purely accumulation for the weekly-ceiling regression
+  // (X = median(dw/ds)) once enough pairs exist. Collection has to start now: it can't be
+  // backfilled, and three weeks in India on tablet-only would otherwise pass with nothing
+  // recorded.
+  function recordPair(sessPct, weekPct) {
+    if (sessPct == null || weekPct == null) return;
+    const prev = S.pairsPrev;
+    if (prev && prev.session != null && prev.weekly != null) {
+      const ds = sessPct - prev.session, dw = weekPct - prev.weekly;
+      if (ds > 0 && dw > 0) {
+        const arr = S.hist.pairs = S.hist.pairs || [];
+        const now = Date.now();
+        arr.push({ t: now, ds, dw });
+        const keep = KEEP.pairs;
+        while (arr.length && arr[0].t < now - keep) arr.shift();
+      }
+    }
+    S.pairsPrev = { session: sessPct, weekly: weekPct };
+  }
+
   /* ================= SYNC ================= */
   // Merges S.hist across devices through a small self-hosted endpoint (docs/TZ-sync-etap9.md).
   // Uses origFetch exclusively — the intercepted window.fetch above would recurse into its
@@ -270,16 +322,19 @@
     return body;
   }
 
-  // Only accept well-formed {t,p} point arrays for known-shaped keys. A malformed or
-  // unexpected server response must never corrupt S.hist — that would break every
-  // subsequent render() (pace()/charts assume this shape) instead of just this one sync.
+  // Only accept well-formed point arrays for known-shaped keys. A malformed or unexpected
+  // server response must never corrupt S.hist — that would break every subsequent render()
+  // (pace()/charts assume this shape) instead of just this one sync. 'pairs' is {t,ds,dw},
+  // not {t,p} — filtering it against the point shape would silently strip every entry.
   function sanitizeHist(hist) {
     const out = {};
     for (const k in hist) {
       if (k === 'blocks') continue;
       const arr = hist[k];
       if (!Array.isArray(arr)) continue;
-      out[k] = arr.filter(p => p && typeof p.t === 'number' && typeof p.p === 'number');
+      out[k] = (k === 'pairs')
+        ? arr.filter(p => p && typeof p.t === 'number' && typeof p.ds === 'number' && typeof p.dw === 'number')
+        : arr.filter(p => p && typeof p.t === 'number' && typeof p.p === 'number');
     }
     return out;
   }
@@ -927,8 +982,10 @@
     const syncBit = !S.sync.url ? '' : (S.sync.ok === false)
       ? `<span style="color:${COLORS.warn}">${L().syncOffline}</span>`
       : (S.sync.lastOk ? `<span style="color:#5f5f68">${L().syncAgo(fmtAgo(Date.now() - S.sync.lastOk))}</span>` : '');
+    const storBit = S.storageWarn ? `<span style="color:${COLORS.warn}" title="${L().storageWarnTip}">${L().storageWarn}</span>` : '';
     return `<div class="clt-ft">
       <a href="/settings/usage" target="_blank">${L().fullDetail}</a><span class="sp"></span>
+      ${storBit}
       ${syncBit}
       <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : L().noData}</span>
       <span>v${VERSION}</span></div>`;
