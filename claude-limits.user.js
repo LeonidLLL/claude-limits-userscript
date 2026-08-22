@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.3
+// @version      29.4
 // @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting and SVG charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.3';
+  const VERSION = '29.4';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -36,9 +36,10 @@
   /* ================= STATE ================= */
   function loadState() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch (e) { return {}; } }
   function saveState() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) {} }
-  const S = Object.assign({ orgId: null, last: null, lastT: 0, hist: {}, ui: { open: false, pos: null }, balance: null, promo: null }, loadState());
+  const S = Object.assign({ orgId: null, last: null, lastT: 0, hist: {}, ui: { open: false, pos: null }, balance: null, promo: null, sync: null }, loadState());
   if (!S.hist) S.hist = {};
   if (!S.ui) S.ui = { open: false, pos: null };
+  if (!S.sync) S.sync = { url: null, token: null, lastOk: null, ok: null };
   // first run: follow the browser language, then remember whatever the user picks
   if (!S.ui.lang) S.ui.lang = /^ru\b/i.test(navigator.language || '') ? 'ru' : 'en';
 
@@ -66,6 +67,8 @@
       expiresUnused: (pct, day, time) => pct + '% left will expire ' + day + ' ' + time,
       fullDetail: 'Full detail → Usage',
       tipRefresh: 'Refresh', tipCollapse: 'Collapse', tipLang: 'Switch language',
+      tipSync: 'Sync settings', syncUrlPrompt: 'Sync URL (blank to disable):', syncTokenPrompt: 'Sync token:',
+      syncOffline: 'sync: offline', syncAgo: t => 'sync: ' + t,
       tipBadge: '5-hour window — click for detail, drag to move',
       noOrg: 'orgId not detected — open any chat', error: e => 'Error: ' + e,
       days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
@@ -94,6 +97,8 @@
       expiresUnused: (pct, day, time) => 'остаток ' + pct + '% сгорит ' + day + ' ' + time,
       fullDetail: 'Подробности → Usage',
       tipRefresh: 'Обновить', tipCollapse: 'Свернуть', tipLang: 'Переключить язык',
+      tipSync: 'Настройки синхронизации', syncUrlPrompt: 'URL синхронизации (пусто — выключить):', syncTokenPrompt: 'Токен синхронизации:',
+      syncOffline: 'синхр.: офлайн', syncAgo: t => 'синхр.: ' + t,
       tipBadge: '5-часовое окно — клик: детали, перетаскивание: переместить',
       noOrg: 'orgId не определён — открой любой чат', error: e => 'Ошибка: ' + e,
       days: ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'],
@@ -231,6 +236,57 @@
     const now = Date.now();
     if (sess.resetAt <= now) return 0;
     return activeHours(now, Math.min(sess.resetAt, until));
+  }
+
+  /* ================= SYNC ================= */
+  // Merges S.hist across devices through a small self-hosted endpoint (docs/TZ-sync-etap9.md).
+  // Uses origFetch exclusively — the intercepted window.fetch above would recurse into its
+  // own usage-endpoint matcher and back into ingest(). URL/token live only in S.sync,
+  // set through the UI prompt below; never hardcoded, never logged.
+  function syncUrl() { return S.sync.url.replace(/\/+$/, '') + '/sync'; }
+
+  // {t,p} point series only — S.hist.blocks holds {start,end} intervals, a different
+  // shape the server's t/p merge doesn't understand, so it's excluded from the wire format.
+  function syncPayload() {
+    const out = {};
+    for (const k in S.hist) { if (k !== 'blocks') out[k] = S.hist[k]; }
+    let body = JSON.stringify({ hist: out });
+    if (body.length > 1e6 && S.sync.lastOk) {
+      const trimmed = {};
+      for (const k in out) trimmed[k] = (out[k] || []).filter(p => p.t > S.sync.lastOk);
+      body = JSON.stringify({ hist: trimmed });
+    }
+    return body;
+  }
+
+  async function syncNow() {
+    if (!S.sync || !S.sync.url || !S.sync.token) return;
+    try {
+      const r = await origFetch(syncUrl(), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + S.sync.token },
+        body: syncPayload()
+      });
+      if (!r.ok) { S.sync.ok = false; saveState(); render(); return; }
+      const data = await r.json();
+      if (!data || typeof data.hist !== 'object') { S.sync.ok = false; saveState(); render(); return; }
+      S.hist = Object.assign({}, data.hist, S.hist.blocks ? { blocks: S.hist.blocks } : {});
+      S.sync.ok = true; S.sync.lastOk = Date.now();
+      saveState(); render();
+    } catch (e) {
+      // network error — stay silent, keep working on local data; footer shows "sync: offline"
+      S.sync.ok = false; saveState(); render();
+    }
+  }
+
+  function configureSync() {
+    const url = prompt(L().syncUrlPrompt, S.sync.url || '');
+    if (url === null) return;
+    const token = url.trim() ? prompt(L().syncTokenPrompt, S.sync.token || '') : '';
+    if (token === null) return;
+    S.sync = { url: url.trim() || null, token: token.trim() || null, lastOk: null, ok: null };
+    saveState(); render();
+    if (S.sync.url && S.sync.token) syncNow();
   }
 
   /* ---- balance and promo: API first, DOM as fallback ---- */
@@ -754,6 +810,7 @@
 
     let html = `<div class="clt-hd"><span class="t">Claude Limits</span>
       <button id="clt-l" class="lang" title="${L().tipLang}">${L().code}</button>
+      <button id="clt-s" title="${L().tipSync}">⇄</button>
       <button id="clt-r" title="${L().tipRefresh}">↻</button>
       <button id="clt-x" title="${L().tipCollapse}">✕</button></div>`;
 
@@ -818,14 +875,19 @@
     }
 
     const stale = S.lastT && (Date.now() - S.lastT > POLL_MINUTES * 2 * 60e3);
+    const syncBit = !S.sync.url ? '' : (S.sync.ok === false)
+      ? `<span style="color:${COLORS.warn}">${L().syncOffline}</span>`
+      : (S.sync.lastOk ? `<span style="color:#5f5f68">${L().syncAgo(fmtAgo(Date.now() - S.sync.lastOk))}</span>` : '');
     html += `<div class="clt-ft">
       <a href="/settings/usage" target="_blank">${L().fullDetail}</a><span class="sp"></span>
+      ${syncBit}
       <span style="color:${stale ? COLORS.warn : '#5f5f68'}">${S.lastT ? fmtAgo(Date.now() - S.lastT) : L().noData}</span>
       <span>v${VERSION}</span></div>`;
 
     panel.innerHTML = html;
-    const rb = panel.querySelector('#clt-r'), xb = panel.querySelector('#clt-x'), lb = panel.querySelector('#clt-l');
+    const rb = panel.querySelector('#clt-r'), xb = panel.querySelector('#clt-x'), lb = panel.querySelector('#clt-l'), sb = panel.querySelector('#clt-s');
     if (lb) lb.onclick = toggleLang;
+    if (sb) sb.onclick = configureSync;
     if (rb) rb.onclick = () => poll(true);
     if (xb) xb.onclick = () => { S.ui.open = false; saveState(); render(); };
   }
@@ -844,6 +906,8 @@
     scanDOM();
     setTimeout(() => poll(false), 2500);
     setInterval(() => poll(false), POLL_MINUTES * 60e3);
+    setTimeout(syncNow, 4000);
+    setInterval(syncNow, 15 * 60e3);
     setInterval(render, 20e3);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && Date.now() - S.lastT > 2 * 60e3) poll(false);
