@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.2
+// @version      29.3
 // @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting and SVG charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.2';
+  const VERSION = '29.3';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -656,18 +656,39 @@
     </svg>`;
   }
 
-  // compact 5-hour-window sparkline over the last 24h — the sawtooth of successive
-  // sessions burning down and resetting
-  function sessionSparklineSvg() {
-    const now = Date.now(), from = now - 24 * 3600e3;
-    const pts = (S.hist.session || []).filter(p => p.t >= from);
-    if (pts.length < 2) return '';
-    const W = 240, H = 28, PAD = 2;
-    const x = t => PAD + (t - from) / (now - from) * (W - PAD * 2);
+  // 5-hour window chart, scoped to the *current* window only (start = resetAt - 5h) —
+  // shows how this session is tracking toward the limit against an even-pace line.
+  // Earlier versions plotted the last 24h across multiple reset cycles; that read as
+  // noise (old, already-reset windows) and didn't answer "am I approaching the limit
+  // right now", so it's gone.
+  function sessionChartSvg(sess, col) {
+    if (!sess || sess.idle || !sess.resetAt) return '';
+    const start = sess.resetAt - SESSION_WINDOW_MS, now = Date.now();
+    const W = 240, H = 56, PAD = 3;
+    const x = t => PAD + Math.min(1, Math.max(0, (t - start) / SESSION_WINDOW_MS)) * (W - PAD * 2);
     const y = p => H - PAD - Math.min(100, Math.max(0, p)) / 100 * (H - PAD * 2);
-    const path = pts.map((p, i) => (i ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.p).toFixed(1)).join(' ');
+
+    const hourLines = [];
+    for (let h = 1; h < 5; h++) {
+      const xt = x(start + h * 3600e3);
+      hourLines.push(`<line x1="${xt.toFixed(1)}" y1="${PAD}" x2="${xt.toFixed(1)}" y2="${H - PAD}" stroke="#2a2a31" stroke-width="1"/>`);
+    }
+
+    const evenPacePath = `M${x(start).toFixed(1)},${y(0).toFixed(1)} L${x(sess.resetAt).toFixed(1)},${y(100).toFixed(1)}`;
+
+    const hist = (S.hist.session || []).filter(p => p.t >= start && p.t <= sess.resetAt);
+    const factPts = hist.concat([{ t: now, p: sess.pct }]);
+    const factPath = factPts.length >= 2
+      ? factPts.map((p, i) => (i ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.p).toFixed(1)).join(' ')
+      : '';
+
+    const nowX = x(now);
+
     return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:${H}px;display:block;margin-top:6px;">
-      <path d="${path}" fill="none" stroke="${COLORS.accent}" stroke-width="1.5"/>
+      ${hourLines.join('')}
+      <path d="${evenPacePath}" fill="none" stroke="#6f6f78" stroke-width="1.5" stroke-dasharray="3,3"/>
+      ${factPath ? `<path d="${factPath}" fill="none" stroke="${col}" stroke-width="1.75"/>` : ''}
+      <line x1="${nowX.toFixed(1)}" y1="${PAD}" x2="${nowX.toFixed(1)}" y2="${H - PAD}" stroke="#e8e8ee" stroke-width="1" opacity="0.35"/>
     </svg>`;
   }
 
@@ -749,7 +770,7 @@
           <div class="ring">${ring(sess.pct, col)}<div class="rpct" style="color:${col}">${Math.round(sess.pct)}%</div></div>
           <div><div class="lbl">${L().hero}</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
           <div class="sub">${L().resetsAt(fmtTime(sess.resetAt))}</div></div></div>`;
-        html += sessionSparklineSvg();
+        html += sessionChartSvg(sess, col);
       }
     } else {
       html += `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">${L().noData}</div>
