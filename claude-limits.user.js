@@ -199,6 +199,17 @@
     return t;
   }
 
+  // n+1 evenly spaced points of the activity-weighted plan curve across [start, end] —
+  // the curve planPct() reads a single point off of
+  function activityProfileCurve(start, end, n) {
+    const total = activeHours(start, end), out = [];
+    for (let i = 0; i <= n; i++) {
+      const t = start + (end - start) * i / n;
+      out.push({ t, pct: total > 0 ? activeHours(start, t) / total * 100 : 0 });
+    }
+    return out;
+  }
+
   /* ================= BLOCKS ================= */
   // remember when the 5-hour window was exhausted — needed for honest weekly stats
   // (the weekly-ceiling regression in a later stage excludes blocked stretches)
@@ -525,7 +536,7 @@
 #clt-badge .t{font-size:13px;font-weight:700;letter-spacing:.2px;white-space:nowrap;}
 #clt-badge.spin img{animation:cltrot 1s linear infinite;}
 @keyframes cltrot{to{transform:rotate(360deg)}}
-#clt-panel{position:absolute;right:0;bottom:44px;width:268px;background:#17171c;border:1px solid #33333c;border-radius:16px;padding:12px 14px 9px;box-shadow:0 10px 34px rgba(0,0,0,.6);color:#e8e8ee;display:none;}
+#clt-panel{position:absolute;right:0;bottom:44px;width:320px;background:#17171c;border:1px solid #33333c;border-radius:16px;padding:12px 14px 9px;box-shadow:0 10px 34px rgba(0,0,0,.6);color:#e8e8ee;display:none;}
 #clt-panel.open{display:block;}
 .clt-hd{display:flex;align-items:center;gap:6px;margin-bottom:10px;}
 .clt-hd .t{font-size:11px;font-weight:600;color:#8b8b94;flex:1;letter-spacing:.3px;text-transform:uppercase;}
@@ -601,6 +612,62 @@
       <circle cx="27" cy="27" r="${R}" fill="none" stroke="#2a2a31" stroke-width="5"/>
       <circle cx="27" cy="27" r="${R}" fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round"
         stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/>
+    </svg>`;
+  }
+
+  // weekly forecast chart: accumulated fact from S.hist, the activity-profile curve,
+  // a "now" marker, and blocked-interval hatching. No ceiling line yet — that needs the
+  // X-coefficient regression from a later stage, and stays silent until there's data.
+  function weeklyChartSvg(it) {
+    if (!it.resetAt || !it.windowMs) return '';
+    const start = it.resetAt - it.windowMs, now = Date.now();
+    const W = 300, H = 96, PAD = 4;
+    const x = t => PAD + Math.min(1, Math.max(0, (t - start) / it.windowMs)) * (W - PAD * 2);
+    const y = p => H - PAD - Math.min(100, Math.max(0, p)) / 100 * (H - PAD * 2);
+
+    const blocks = (S.hist.blocks || []).filter(b => b.end > start && b.start < it.resetAt);
+    const hatches = blocks.map(b => {
+      const x1 = x(Math.max(b.start, start)), x2 = x(Math.min(b.end, it.resetAt));
+      return `<rect x="${x1.toFixed(1)}" y="${PAD}" width="${Math.max(0, x2 - x1).toFixed(1)}" height="${H - PAD * 2}" fill="#e8e8ee" opacity="0.06"/>`;
+    }).join('');
+
+    const dayLines = [];
+    for (let d = 1; d * 86400e3 < it.windowMs; d++) {
+      const xt = x(start + d * 86400e3);
+      dayLines.push(`<line x1="${xt.toFixed(1)}" y1="${PAD}" x2="${xt.toFixed(1)}" y2="${H - PAD}" stroke="#2a2a31" stroke-width="1"/>`);
+    }
+
+    const prof = activityProfileCurve(start, it.resetAt, 28);
+    const profPath = prof.map((p, i) => (i ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.pct).toFixed(1)).join(' ');
+
+    const hist = (S.hist[it.key] || []).filter(p => p.t >= start && p.t <= it.resetAt);
+    const factPts = now <= it.resetAt ? hist.concat([{ t: now, p: it.pct }]) : hist;
+    const factPath = factPts.length >= 2
+      ? factPts.map((p, i) => (i ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.p).toFixed(1)).join(' ')
+      : '';
+
+    const nowX = x(Math.min(now, it.resetAt));
+
+    return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:${H}px;display:block;margin-top:8px;">
+      ${hatches}${dayLines.join('')}
+      <path d="${profPath}" fill="none" stroke="#6f6f78" stroke-width="1.5" stroke-dasharray="3,3"/>
+      ${factPath ? `<path d="${factPath}" fill="none" stroke="${COLORS.accent}" stroke-width="1.75"/>` : ''}
+      <line x1="${nowX.toFixed(1)}" y1="${PAD}" x2="${nowX.toFixed(1)}" y2="${H - PAD}" stroke="#e8e8ee" stroke-width="1" opacity="0.35"/>
+    </svg>`;
+  }
+
+  // compact 5-hour-window sparkline over the last 24h — the sawtooth of successive
+  // sessions burning down and resetting
+  function sessionSparklineSvg() {
+    const now = Date.now(), from = now - 24 * 3600e3;
+    const pts = (S.hist.session || []).filter(p => p.t >= from);
+    if (pts.length < 2) return '';
+    const W = 240, H = 28, PAD = 2;
+    const x = t => PAD + (t - from) / (now - from) * (W - PAD * 2);
+    const y = p => H - PAD - Math.min(100, Math.max(0, p)) / 100 * (H - PAD * 2);
+    const path = pts.map((p, i) => (i ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.p).toFixed(1)).join(' ');
+    return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:${H}px;display:block;margin-top:6px;">
+      <path d="${path}" fill="none" stroke="${COLORS.accent}" stroke-width="1.5"/>
     </svg>`;
   }
 
@@ -682,6 +749,7 @@
           <div class="ring">${ring(sess.pct, col)}<div class="rpct" style="color:${col}">${Math.round(sess.pct)}%</div></div>
           <div><div class="lbl">${L().hero}</div><div class="big" style="color:${col}">${fmtDur(sess.resetAt - Date.now())}</div>
           <div class="sub">${L().resetsAt(fmtTime(sess.resetAt))}</div></div></div>`;
+        html += sessionSparklineSvg();
       }
     } else {
       html += `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">${L().noData}</div>
@@ -698,6 +766,7 @@
         <div class="clt-bar"><i style="width:${Math.min(100, it.pct)}%;background:${col}"></i>${dayTicks()}${planMark(plan)}</div>
         ${it.resetAt ? `<div class="clt-sub">${L().rowResets(fmtDay(it.resetAt), fmtTime(it.resetAt), fmtDur(it.resetAt - Date.now()))}</div>` : ''}
         ${p.note ? `<div class="clt-warn" style="color:${col}">${esc(p.note)}</div>` : ''}
+        ${it.key === 'weekly_all' ? weeklyChartSvg(it) : ''}
       </div>`;
     }
 
