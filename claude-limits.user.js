@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      29.7
+// @version      29.8
 // @description  Claude usage tracker (EN/RU): the 5-hour window front and center, weekly limit and credits on one line each, with activity-aware forecasting and SVG charts. Full detail lives on the Usage page.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
@@ -17,7 +17,7 @@
   if (window.top !== window.self) return;
 
   /* ================= CONFIG ================= */
-  const VERSION = '29.7';
+  const VERSION = '29.8';
   const POLL_MINUTES = 5;
   const PROMO_GRANT = 100;              // original promotional grant size, $
   const LS_KEY = 'clt25_state';         // legacy key — keeps history and badge position across upgrades
@@ -70,7 +70,8 @@
       paceSuffix: p => ' · pace ' + p + '%/active-h',
       fullDetail: 'Full detail → Usage',
       tipRefresh: 'Refresh', tipCollapse: 'Collapse', tipLang: 'Switch language',
-      tipSync: 'Sync settings', syncUrlPrompt: 'Sync URL (blank to disable):', syncTokenPrompt: 'Sync token:',
+      tipSync: 'Sync settings', syncUrlPh: 'Sync URL', syncTokenPh: 'Sync token',
+      syncSave: 'Save', syncClear: 'Disable', syncCancel: 'Cancel',
       syncOffline: 'sync: offline', syncAgo: t => 'sync: ' + t,
       tipMode: 'Click to switch view: compact / expanded / wide',
       colSession: '5-hour window', colWeek: 'Week', colForecast: 'Forecast', colCredits: 'Credits',
@@ -104,7 +105,8 @@
       paceSuffix: p => ' · темп ' + p + '%/акт.ч',
       fullDetail: 'Подробности → Usage',
       tipRefresh: 'Обновить', tipCollapse: 'Свернуть', tipLang: 'Переключить язык',
-      tipSync: 'Настройки синхронизации', syncUrlPrompt: 'URL синхронизации (пусто — выключить):', syncTokenPrompt: 'Токен синхронизации:',
+      tipSync: 'Настройки синхронизации', syncUrlPh: 'URL синхронизации', syncTokenPh: 'Токен синхронизации',
+      syncSave: 'Сохранить', syncClear: 'Выключить', syncCancel: 'Отмена',
       syncOffline: 'синхр.: офлайн', syncAgo: t => 'синхр.: ' + t,
       tipMode: 'Клик — переключить вид: compact / expanded / wide',
       colSession: 'Окно 5ч', colWeek: 'Неделя', colForecast: 'Прогноз', colCredits: 'Кредиты',
@@ -308,15 +310,11 @@
     }
   }
 
-  function configureSync() {
-    const url = prompt(L().syncUrlPrompt, S.sync.url || '');
-    if (url === null) return;
-    const token = url.trim() ? prompt(L().syncTokenPrompt, S.sync.token || '') : '';
-    if (token === null) return;
-    S.sync = { url: url.trim() || null, token: token.trim() || null, lastOk: null, ok: null };
-    saveState(); render();
-    if (S.sync.url && S.sync.token) syncNow();
-  }
+  // In-panel form, not prompt(): two sequential native prompt() dialogs froze the whole
+  // tab on Firefox Android (a known class of mobile-browser bug — prompt() blocks the
+  // main thread, and a dialog that doesn't resolve cleanly takes the page down with it).
+  let syncFormOpen = false;
+  function toggleSyncForm() { syncFormOpen = !syncFormOpen; render(); }
 
   /* ---- balance and promo: API first, DOM as fallback ---- */
   function moneyVal(k, v) {
@@ -656,6 +654,14 @@
 .clt-plan{font-size:10.5px;font-weight:600;}
 .clt-sub{font-size:10.5px;color:#6f6f78;margin-top:4px;}
 .clt-warn{font-size:11px;margin-top:4px;font-weight:500;}
+.clt-sync{padding:2px 0 12px;border-bottom:1px solid #26262d;margin-bottom:2px;}
+.clt-sync input{width:100%;box-sizing:border-box;background:#0f0f13;border:1px solid #33333c;border-radius:8px;color:#e8e8ee;font-size:13px;padding:9px 10px;margin-bottom:8px;min-height:36px;}
+.clt-sync input:focus{outline:none;border-color:${COLORS.accent};}
+.clt-sync-btns{display:flex;gap:8px;justify-content:flex-end;}
+.clt-sync-btns button{background:#26262d;border:none;color:#c9c9d2;cursor:pointer;font-size:12px;padding:8px 12px;border-radius:8px;min-height:36px;}
+.clt-sync-btns button:hover{background:#33333c;}
+.clt-sync-btns button.primary{background:${COLORS.accent};color:#fff;font-weight:600;}
+.clt-sync-btns button.primary:hover{filter:brightness(1.1);}
 .clt-ft{display:flex;align-items:center;gap:6px;margin-top:9px;padding-top:8px;border-top:1px solid #26262d;font-size:10px;color:#5f5f68;}
 .clt-ft a{color:${COLORS.accent};text-decoration:none;font-weight:600;font-size:10.5px;}
 .clt-ft a:hover{text-decoration:underline;}
@@ -842,6 +848,18 @@
       <button id="clt-x" title="${L().tipCollapse}">✕</button></div>`;
   }
 
+  function syncFormHtml() {
+    return `<div class="clt-sync">
+      <input id="clt-sync-url" type="text" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="${L().syncUrlPh}" value="${esc(S.sync.url || '')}">
+      <input id="clt-sync-token" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="${L().syncTokenPh}" value="${esc(S.sync.token || '')}">
+      <div class="clt-sync-btns">
+        <button id="clt-sync-cancel">${L().syncCancel}</button>
+        <button id="clt-sync-clear">${L().syncClear}</button>
+        <button id="clt-sync-save" class="primary">${L().syncSave}</button>
+      </div>
+    </div>`;
+  }
+
   function heroHtml(sess, withChart) {
     if (!sess) return `<div class="clt-hero"><div><div class="big" style="color:${COLORS.muted}">${L().noData}</div>
       <div class="sub">${L().pressRefresh}</div></div></div>`;
@@ -1001,14 +1019,30 @@
       body = compactBody(items, sess);
     }
     panel.style.width = width + 'px';
-    panel.innerHTML = headerHtml() + body + footerHtml();
+    panel.innerHTML = headerHtml() + (syncFormOpen ? syncFormHtml() : '') + body + footerHtml();
 
     const rb = panel.querySelector('#clt-r'), xb = panel.querySelector('#clt-x'), lb = panel.querySelector('#clt-l'), sb = panel.querySelector('#clt-s'), tb = panel.querySelector('#clt-t');
     if (lb) lb.onclick = toggleLang;
-    if (sb) sb.onclick = configureSync;
+    if (sb) sb.onclick = toggleSyncForm;
     if (tb) tb.onclick = cycleMode;
     if (rb) rb.onclick = () => poll(true);
     if (xb) xb.onclick = () => { S.ui.open = false; saveState(); render(); };
+
+    if (syncFormOpen) {
+      const uEl = panel.querySelector('#clt-sync-url'), tEl = panel.querySelector('#clt-sync-token');
+      const saveB = panel.querySelector('#clt-sync-save'), clearB = panel.querySelector('#clt-sync-clear'), cancelB = panel.querySelector('#clt-sync-cancel');
+      if (saveB) saveB.onclick = () => {
+        const url = ((uEl && uEl.value) || '').trim(), token = ((tEl && tEl.value) || '').trim();
+        S.sync = { url: url || null, token: token || null, lastOk: null, ok: null };
+        syncFormOpen = false; saveState(); render();
+        if (S.sync.url && S.sync.token) syncNow();
+      };
+      if (clearB) clearB.onclick = () => {
+        S.sync = { url: null, token: null, lastOk: null, ok: null };
+        syncFormOpen = false; saveState(); render();
+      };
+      if (cancelB) cancelB.onclick = () => { syncFormOpen = false; render(); };
+    }
   }
 
   function toast(msg) {
