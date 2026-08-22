@@ -8,6 +8,13 @@
 // {t,p} points do, so it gets its own merge function instead of being forced through
 // mergePoints() (which would compare .p on entries that don't have one, at best a no-op,
 // at worst silently coalescing distinct pairs that happen to land within 60s of each other).
+//
+// v3: closes the server side of the contract the client already enforces — a key
+// whitelist (isSyncable) instead of merging whatever keys happen to show up, and a
+// per-item shape filter inside each merge function (a non-numeric t would otherwise sort
+// as NaN and scramble ordering unpredictably). Neither fires today since the client only
+// ever sends well-formed data, which is exactly why they're easy to lose track of —
+// they're for whatever adds a new key or a malformed client six months from now.
 
 const KEEP = {
   session: 30 * 86400e3,
@@ -16,15 +23,28 @@ const KEEP = {
   promo_left: 62 * 86400e3,
   pairs: 90 * 86400e3,
 };
+// Server-side half of the contract, mirroring the client's sanitizeHist(): only these
+// keys (plus dynamic slot_* sub-limits — Opus/Sonnet/Cowork/Fable, present only once a
+// model wakes a sub-limit, so they can't be enumerated up front) are ever read from or
+// written to KV. Without this, the merge loop iterated every key present on either side,
+// so 'blocks' (a different {start,end} shape entirely) or any future unknown key would
+// pass straight through — the client-side whitelist alone isn't a contract, just one
+// implementation's opinion.
+const SYNCABLE_BASE = ['session', 'weekly_all', 'spend', 'promo_left', 'pairs'];
+function isSyncable(k) { return SYNCABLE_BASE.includes(k) || k.startsWith('slot_'); }
 const CORS = {
   'Access-Control-Allow-Origin': 'https://claude.ai',
   'Access-Control-Allow-Headers': 'authorization,content-type',
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
 };
 
-// {t,p} shape — collapse near-duplicate samples of the same reading
+// {t,p} shape — collapse near-duplicate samples of the same reading. Filters to
+// well-formed entries first: an object with a non-numeric t would sort as NaN and
+// scramble the order unpredictably.
 function mergePoints(a, b, keep) {
-  const all = [...(a || []), ...(b || [])].sort((x, y) => x.t - y.t);
+  const all = [...(a || []), ...(b || [])]
+    .filter(p => p && typeof p.t === 'number' && typeof p.p === 'number')
+    .sort((x, y) => x.t - y.t);
   const out = [];
   for (const p of all) {
     const last = out[out.length - 1];
@@ -37,7 +57,9 @@ function mergePoints(a, b, keep) {
 
 // {t,ds,dw} shape — no value to compare, dedup on t alone
 function mergePairs(a, b, keep) {
-  const all = [...(a || []), ...(b || [])].sort((x, y) => x.t - y.t);
+  const all = [...(a || []), ...(b || [])]
+    .filter(p => p && typeof p.t === 'number' && typeof p.ds === 'number' && typeof p.dw === 'number')
+    .sort((x, y) => x.t - y.t);
   const out = [];
   for (const p of all) {
     const last = out[out.length - 1];
@@ -66,7 +88,8 @@ export default {
       const body = await req.json();
       const incoming = body.hist || {};
       const out = {};
-      for (const k of new Set([...Object.keys(stored), ...Object.keys(incoming)]))
+      const keys = new Set([...SYNCABLE_BASE, ...Object.keys(stored), ...Object.keys(incoming)].filter(isSyncable));
+      for (const k of keys)
         out[k] = merge(k, stored[k], incoming[k], KEEP[k] || KEEP.weekly_all);
       await env.HIST.put('hist', JSON.stringify(out));
       return Response.json({ hist: out }, { headers: CORS });
