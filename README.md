@@ -1,76 +1,62 @@
 # Claude Limits
 
 A Tampermonkey userscript that shows your Claude usage limits at a glance, without
-opening the Usage page — the 5-hour session window front and center, the weekly
-limit and monthly credit spend one line each, with activity-aware forecasting and
-inline charts.
+opening the Usage page. It answers one question: *can I send this message now, and
+what will it cost.* No forecast of "when will I run out" — that question isn't
+useful, so it isn't answered.
 
 ## What it shows
 
-**Badge** (always visible, draggable)
-The session reset time and how much of the window is used: `15:50 · 10%`.
-The colour tells you the state without opening anything.
+**Badge** (always visible, draggable) — the 5-hour session reset time and how much
+of the window is used: `15:50 · 10%`. The colour comes straight from the server's
+own `severity` field.
 
-**Panel** (click the badge) — three view modes, cycled by clicking the panel title:
+**Panel** (click the badge) — four lines, no charts, no view modes:
 
-- **compact** (~280px) — the original minimal view: ring, bars, one line each.
-- **expanded** (~420px) — compact plus the norm/pace line, the weekly forecast
-  chart, and a chart of the current 5-hour window.
-- **wide** (700–1100px, 2 or 4 columns depending on window width) — the same
-  information laid out horizontally: 5-hour window / Week / Forecast / Credits.
-  This is the mode worth using on a large monitor or a tablet in desktop mode —
-  it's shorter, not just wider, which matters when the panel has to fit inside a
-  window instead of scrolling.
+```
+5-hour     53%          resets in 2:19
+Weekly     52%          resets in 17:00
+Credits    $30.05 / $50.00   (60%)
+Headroom   $19.95 until Sep 1
+```
 
-Below 700px window width the panel always falls back to compact, regardless of
-which mode is selected — there isn't room for anything else.
+- **5-hour** / **Weekly** and anything else the server adds to its `limits` array
+  — new limit kinds appear as their own line automatically, no code change needed.
+- **Credits** — this month's spend against the plan's extra-usage limit.
+- **Headroom** — `limit − used`, the direct answer to "how much room is left before
+  the plan starts charging." This is the number the widget exists for.
+- A line for credits appears only when something is abnormal: credits turned off,
+  the monthly spend limit reached, or credits disabled manually.
+
+Countdowns are computed locally from the `resets_at` timestamps and tick every few
+seconds — they keep going even if the network drops, and the whole widget dims
+once the underlying data is more than 10 minutes old.
+
+### Fail-loud
+
+If the response doesn't match the expected shape (missing `limits`, missing
+`spend.used.amount_minor`, a non-numeric exponent), the panel shows `⚠ schema
+changed` instead of any numbers — including old ones already on screen. A stale or
+wrong number is worse than no number.
 
 ## How the numbers are derived
 
-Session and weekly figures come from the same internal endpoint the Usage page
-uses, polled every five minutes and refreshed whenever the page fetches it on its
-own.
+Everything comes from one endpoint:
 
-The balance and promotional credit are read from the Usage page — either from the
-billing API response or, failing that, from the page itself. Between visits to that
-page the promo figure is kept current by subtracting spend recorded since the
-snapshot, so it does not drift.
+```
+GET /api/organizations/{org_uuid}/usage
+```
 
-### Activity-aware forecasting
+`org_uuid` is never hardcoded — it's read out of the URL of whatever API request
+the page makes first, and cached. Two paths feed the widget: a **passive** listener
+on every `/usage` response the page itself triggers (free), and an **active** poll
+via the same URL every 60 seconds while the tab is visible (5 minutes while
+hidden). A passive update resets the active timer, so the two never double up.
 
-The weekly limit isn't spread evenly across the calendar — it's spread across an
-activity profile: work hours only (configurable, defaults to 7:00–21:00 local time,
-Mon–Fri at full weight, weekends at reduced weight), with any stretch where the
-5-hour window is exhausted subtracted from what's left. That profile drives:
-
-- **norm** — the %/active-hour needed to land exactly on the limit at reset, shown
-  next to the weekly row once there's enough active time left to compute it.
-- **pace** — the actual rate over the last 3 active hours, shown once there's
-  enough history to trust it (20% of the week elapsed, or 2 weeks of accumulated
-  history — whichever comes first).
-- the even-pace marker on the bar, and the plan curve on the forecast chart.
-
-Uncertainty produces silence, not an alarm: a status line only appears once the
-forecast is trustworthy, and only when the current pace is meaningfully ahead of
-the norm (not just reaching 80–90% at reset — unused quota expires either way, so
-that alone isn't a problem).
-
-### Charts
-
-Inline SVG, no external libraries — CSP on claude.ai blocks `@require` anyway. The
-weekly forecast chart plots the accumulated fact against the activity-profile
-curve, with a "now" marker and hatching over any blocked (session-exhausted)
-stretches. The 5-hour chart is scoped to the current window only — not a rolling
-sparkline across old, already-reset cycles, which reads as noise rather than
-signal.
-
-### Promo warning
-
-Promotional credits are ordinary usage credits — they pay for premium models and
-overage beyond plan limits — but they expire on a fixed date, and the monthly spend
-limit caps how much of them can be drawn down before then. If the two don't fit
-together, the widget says how much will expire and what the limit would need to
-be. Silent unless the shortfall is over $10 and over 10% of the remaining promo.
+Money fields (`amount_minor` / `exponent`) are converted as `amount_minor /
+10^exponent` — never parsed from formatted strings. Percentages for plan limits
+come from the server's `limits[]` array (already rounded); `extra_usage`'s
+utilization is a genuine float and is left as-is.
 
 ## Cross-device sync (optional)
 
@@ -86,6 +72,11 @@ footer, never thrown as an exception), and always calls the endpoint directly vi
 the browser's native `fetch` — never through anything the script itself
 intercepts.
 
+This history is written for continuity and for [`lib/ceiling.js`](lib/ceiling.js)
+(an unwired, tested-but-unused weekly-ceiling estimator kept around for a possible
+future stage) — the widget itself never reads it back for anything shown on
+screen.
+
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
@@ -99,67 +90,32 @@ checks for new versions. A script pasted in by hand never updates.
 ## Privacy
 
 Everything runs locally in your browser by default. State — usage history, badge
-position, panel mode, sync settings — lives in `localStorage` under `clt25_state`.
-The organisation ID is read from your session at runtime and is not stored in the
+position, sync settings — lives in `localStorage` under `clt25_state`. The
+organisation ID is read from your session at runtime and is not stored in the
 source. Nothing is sent anywhere *unless you configure sync yourself*, in which
-case history (not org ID, not balance, not raw API responses) is sent to the
-endpoint you provided, and only there.
+case history (not org ID, not raw API responses) is sent to the endpoint you
+provided, and only there.
 
-## Testing the 8-hour leak scenario
+## Testing
 
-Not automated — this is a manual DevTools pass, done once in a while rather than on
-every change. Reproduce it like this:
+Node.js, no framework — plain `node:assert`:
 
-1. Open claude.ai with the script active, open DevTools → **Memory**.
-2. Take a heap snapshot right after the badge appears (baseline).
-3. Leave the tab open for ~8 hours — normal use is fine, it doesn't need to be idle.
-   The panel only needs to be opened/closed a few times over that period; it doesn't
-   need to stay open.
-4. Take another snapshot (or a few, spaced out) and compare against the baseline —
-   the snapshot comparison view groups by constructor and shows retained-size deltas
-   directly.
+```
+node test/parse.test.js
+node test/ceiling.test.js
+```
 
-**What should stay flat:**
-
-- **DOM node count** (Memory panel's summary, or the Elements panel's node counter).
-  `render()` always does `panel.innerHTML = ...` — a full wholesale replacement, not
-  an append — so old nodes should be released every render (every 20s, plus after
-  every poll/sync). If the node count trends upward over the 8 hours instead of
-  oscillating around a constant, something is retaining old panel content.
-- **Detached DOM tree count**, in the snapshot's summary view. This is the specific
-  signal for "nodes were removed from the document but something still references
-  them" — normally a closure holding an old element. Since every `onclick` handler
-  is reassigned fresh on each `render()` and nothing stores element references
-  outside of `render()`'s own local scope, this should sit at zero.
-- **Event listener count** (Elements panel → Event Listeners, on `window` and
-  `document`). Everything is registered once in `start()`/`buildUI()` — poll and
-  sync intervals, `visibilitychange`, `resize`, and the badge's drag handlers
-  (`mousedown`/`mousemove`/`mouseup`) — never inside `render()`. This count should
-  be identical at hour 0 and hour 8.
-- **Active timers**: exactly three `setInterval`s (poll every 5 min, sync every 15
-  min, render every 20s) plus the debounced `resize` handler's single in-flight
-  `setTimeout` at most. Nothing in the code path creates more of these over time.
-
-**What's expected to grow, and isn't a leak:** the JS heap size itself, slowly and
-boundedly — `S.hist.*` (session, weekly_all, spend, promo_left, pairs, blocks, and
-any active `slot_*` sub-limits) only ever grows within a single 8-hour window, since
-the `KEEP` retention windows (30–90 days) don't start trimming anything that
-recently. Each stored point is a tiny `{t,p}` (or `{t,ds,dw}`, or `{start,end}`)
-object, so even the busiest key adding a point every 5 minutes for 8 hours is under
-a hundred entries — this should read as a small, linear, unremarkable increase, not
-an accelerating one. If total heap growth over 8 hours looks disproportionate to
-that (megabytes rather than tens of kilobytes), look at DOM/listener/timer counts
-first — a genuine `S.hist` sizing problem would show up in `localStorage` usage
-(and the `⚠ storage` footer indicator) long before it shows up as a memory leak.
+`test/parse.test.js` exercises `parseUsage()` against a real captured response
+(`test/fixtures/usage-2026-08-23.json`, org id redacted) plus the fail-loud paths:
+a missing `limits` array, a missing `spend.used.amount_minor`, a non-numeric
+exponent, and an unknown `limits[].kind` that must not crash the parser.
 
 ## Compatibility
 
 Chrome + Tampermonkey on Windows, and Firefox Android + Tampermonkey (tested in
 desktop mode on a tablet, landscape) are the two configurations this is actively
-used and tested on. Other Chromium browsers should work. The DOM fallback for
-balance and promo looks for English labels on the Usage page; on other interface
-languages the API path still works. UI is bilingual (EN/RU), switchable from the
-panel.
+used and tested on. Other Chromium browsers should work. UI is bilingual (EN/RU),
+switchable from the panel.
 
 ## Licence
 
