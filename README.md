@@ -28,6 +28,12 @@ Headroom   $19.95 until Sep 1
 - A line for credits appears only when something is abnormal: credits turned off,
   the monthly spend limit reached, or credits disabled manually.
 
+A thin, label-free bar sits under **Weekly**: a tick where usage would be if it
+grew perfectly evenly across the 7-day window, and a fill for the real percent.
+Green while the fill is under the tick, Anthropic orange once it's past. No
+numbers, no projection of when the limit hits zero — just whether this week is
+running ahead of or behind flat-even pace right now.
+
 Countdowns are computed locally from the `resets_at` timestamps and tick every few
 seconds — they keep going even if the network drops, and the whole widget dims
 once the underlying data is more than 10 minutes old.

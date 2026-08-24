@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      31.1
-// @description  Claude usage tracker (EN/RU): four lines from the single /usage JSON endpoint — 5-hour window, weekly limit, credits, headroom. No DOM scraping, no forecast, no charts. Sync is off by default.
+// @version      31.2
+// @description  Claude usage tracker (EN/RU): four lines from the single /usage JSON endpoint — 5-hour window, weekly limit, credits, headroom, plus a quiet calendar-pace bar under the weekly limit. No DOM scraping, no charts. Sync is off by default.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
 // @updateURL    https://raw.githubusercontent.com/LeonidLLL/claude-limits-userscript/main/claude-limits.user.js
@@ -57,13 +57,17 @@
     return { limit, used, remaining };
   }
 
-  function fmtCountdown(ms) {
+  // `units` lets the day/hour suffix (only used past the 24h mark — below that
+  // it's a plain "H:MM" with no letters to translate) be localized by the
+  // caller; defaults to English so existing callers/tests are unaffected.
+  function fmtCountdown(ms, units) {
     if (ms == null || !isFinite(ms) || ms < 0) return '—';
+    const u = units || { d: 'd', h: 'h' };
     const totalMin = Math.floor(ms / 60000);
     const days = Math.floor(totalMin / 1440);
     const hours = Math.floor((totalMin % 1440) / 60);
     const mins = totalMin % 60;
-    if (days > 0) return days + 'd ' + hours + 'h';
+    if (days > 0) return days + u.d + ' ' + hours + u.h;
     return hours + ':' + String(mins).padStart(2, '0');
   }
 
@@ -128,7 +132,7 @@
     (function () {
 
   /* ================= CONFIG ================= */
-  const VERSION = '31.1';
+  const VERSION = '31.2';
   const LS_KEY = 'clt25_state';         // legacy key — keeps orgId and badge position across upgrades
   const STALE_MS = 10 * 60e3;           // widget dims past this data age
   const POLL_ACTIVE_MS = 60e3;          // active poll interval, tab visible
@@ -180,6 +184,7 @@
     en: {
       code: 'EN',
       kindLabels: { session: '5-hour', weekly_all: 'Weekly' },
+      countdownUnits: { d: 'd', h: 'h' },
       waitingData: '⏳ waiting for data', notStarted: 'not started',
       resetsInWord: 'resets in',
       creditsLabel: 'Credits', headroomLabel: 'Headroom', untilDate: d => 'until ' + d,
@@ -204,6 +209,7 @@
     ru: {
       code: 'RU',
       kindLabels: { session: '5 часов', weekly_all: 'Неделя' },
+      countdownUnits: { d: 'д', h: 'ч' },
       waitingData: '⏳ ожидание данных', notStarted: 'не начато',
       resetsInWord: 'сброс через',
       creditsLabel: 'Кредиты', headroomLabel: 'Запас', untilDate: d => 'до ' + d,
@@ -528,6 +534,9 @@
 .clt-row .v{font-weight:700;flex:0 0 auto;}
 .clt-row .r{color:#8b8b94;margin-left:auto;text-align:right;font-size:11px;white-space:nowrap;}
 .clt-row .r b{color:#e8e8ee;font-weight:700;font-style:normal;}
+.clt-wbar{position:relative;height:3px;background:#2a2a31;border-radius:2px;margin:-1px 0 8px;}
+.clt-wbar i{display:block;height:100%;border-radius:2px;transition:width .4s;}
+.clt-wbar b{position:absolute;top:-2.5px;bottom:-2.5px;width:1.5px;margin-left:-.75px;background:#e8e8ee;opacity:.55;border-radius:1px;}
 .clt-warn{font-size:11px;margin-top:2px;padding:2px 0;color:${COLORS.bad};font-weight:500;}
 .clt-sync{padding:2px 0 12px;border-bottom:1px solid #26262d;margin-bottom:2px;}
 .clt-sync-note{font-size:10.5px;color:#8b8b94;margin-bottom:8px;line-height:1.4;}
@@ -632,9 +641,27 @@
     // the Headroom value — everything around it (the label word) stays muted.
     let right;
     if (idle) right = esc(L().notStarted);
-    else if (l.resetsAt && l.resetsAt > now) right = esc(L().resetsInWord) + ' <b class="rt">' + esc(fmtCountdown(l.resetsAt - now)) + '</b>';
+    else if (l.resetsAt && l.resetsAt > now) right = esc(L().resetsInWord) + ' <b class="rt">' + esc(fmtCountdown(l.resetsAt - now, L().countdownUnits)) + '</b>';
     else right = '';
     return `<div class="clt-row"><span class="n">${esc(label)}</span><span class="v" style="color:${col}">${valueTxt}</span><span class="r">${right}</span></div>`;
+  }
+
+  const WEEK_MS = 7 * 86400e3;
+
+  // A quiet, label-free read of "am I ahead of or behind a plain calendar-linear
+  // pace toward the weekly limit" — the tick sits where usage would be if it grew
+  // evenly across the 7-day window (no activity-profile weighting, just elapsed
+  // / total); the bar is the real percent. Green while under the tick, Anthropic
+  // orange once it's past it. Only for weekly_all — deliberately not a generic
+  // per-row feature, and not extended to any other `limits[]` kind.
+  function weeklyProgressHtml(l) {
+    if (l.kind !== 'weekly_all' || !l.resetsAt || l.percent == null) return '';
+    const weekStart = l.resetsAt - WEEK_MS;
+    const elapsed = Math.min(Math.max(Date.now() - weekStart, 0), WEEK_MS);
+    const tickPct = elapsed / WEEK_MS * 100;
+    const fillPct = Math.min(100, Math.max(0, l.percent));
+    const barColor = fillPct > tickPct ? COLORS.accent : '#4ade80';
+    return `<div class="clt-wbar"><i style="width:${fillPct.toFixed(1)}%;background:${barColor}"></i><b style="left:${tickPct.toFixed(1)}%"></b></div>`;
   }
 
   function creditsRowHtml(spend) {
@@ -666,7 +693,10 @@
       return `<div class="clt-row"><span class="n" style="color:${COLORS.muted}">${L().waitingData}</span></div>`;
     }
     let html = '';
-    for (const l of S.parsed.limits) html += limitRowHtml(l);
+    for (const l of S.parsed.limits) {
+      html += limitRowHtml(l);
+      html += weeklyProgressHtml(l);
+    }
     html += creditsRowHtml(S.parsed.spend);
     html += headroomRowHtml(S.parsed.spend);
     html += creditWarningsHtml(S.parsed.extraUsage);
