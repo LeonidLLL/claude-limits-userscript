@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Limits
 // @namespace    lisin.claude.limits
-// @version      31.0
-// @description  Claude usage tracker (EN/RU): four lines from the single /usage JSON endpoint — 5-hour window, weekly limit, credits, headroom. No DOM scraping, no forecast, no charts.
+// @version      31.1
+// @description  Claude usage tracker (EN/RU): four lines from the single /usage JSON endpoint — 5-hour window, weekly limit, credits, headroom. No DOM scraping, no forecast, no charts. Sync is off by default.
 // @homepageURL  https://github.com/LeonidLLL/claude-limits-userscript
 // @supportURL   https://github.com/LeonidLLL/claude-limits-userscript/issues
 // @updateURL    https://raw.githubusercontent.com/LeonidLLL/claude-limits-userscript/main/claude-limits.user.js
@@ -24,10 +24,12 @@
    * this section, then reads the module.exports at the bottom.
    * ============================================================ */
 
-  const KNOWN_LABELS = { session: '5-hour', weekly_all: 'Weekly' };
-
+  // Generic fallback label for any `limits[].kind` the server sends — a humanized
+  // version of the slug. session/weekly_all get a proper localized name from the
+  // UI layer's I18N.kindLabels instead; this is only ever shown for kinds that
+  // aren't in that map, so it stays English (there's no reasonable way to
+  // translate a name we don't know in advance).
   function labelForKind(kind) {
-    if (KNOWN_LABELS[kind]) return KNOWN_LABELS[kind];
     return String(kind).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
@@ -126,7 +128,7 @@
     (function () {
 
   /* ================= CONFIG ================= */
-  const VERSION = '31.0';
+  const VERSION = '31.1';
   const LS_KEY = 'clt25_state';         // legacy key — keeps orgId and badge position across upgrades
   const STALE_MS = 10 * 60e3;           // widget dims past this data age
   const POLL_ACTIVE_MS = 60e3;          // active poll interval, tab visible
@@ -139,32 +141,19 @@
   /* ================= STATE ================= */
   function loadState() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch (e) { return {}; } }
 
-  function isQuotaError(e) {
-    return !!e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014);
-  }
-  // localStorage quota is shared with claude.ai's own app usage, not ours alone — it can
-  // run out silently. Drop the oldest slice of every history array and retry once before
-  // giving up; either way, the in-memory state (and the running widget) is never lost,
-  // only the persisted copy.
-  function trimHistoryForQuota() {
-    for (const k in S.hist) {
-      const arr = S.hist[k];
-      if (Array.isArray(arr) && arr.length > 20) arr.splice(0, Math.ceil(arr.length * 0.2));
-    }
-  }
+  // TZ 31.1 §8: state is now small and fixed-size by default (sync, and the
+  // history it feeds, are both off unless the user explicitly turns them on) —
+  // the old 20%-trim-and-retry dance had nothing left worth trimming.
   function saveState() {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify(S));
-      S.storageWarn = false;
-    } catch (e) {
-      if (!isQuotaError(e)) { S.storageWarn = true; return; }
-      trimHistoryForQuota();
-      try { localStorage.setItem(LS_KEY, JSON.stringify(S)); S.storageWarn = false; }
-      catch (e2) { S.storageWarn = true; }
-    }
+    try { localStorage.setItem(LS_KEY, JSON.stringify(S)); S.storageWarn = false; }
+    catch (e) { S.storageWarn = true; }
   }
 
-  const S = Object.assign({ orgId: null, last: null, parsed: null, parseError: null, lastT: 0, hist: {}, ui: { open: false, pos: null }, sync: null, pairsPrev: null, storageWarn: false }, loadState());
+  const S = Object.assign({
+    orgId: null, last: null, parsed: null, parseError: null, lastT: 0, hist: {},
+    ui: { open: false, pos: null }, sync: null, syncEnabled: false, pairsPrev: null,
+    storageWarn: false, histCleanedV311: false
+  }, loadState());
   if (!S.hist) S.hist = {};
   if (!S.ui) S.ui = { open: false, pos: null };
   if (!S.sync) S.sync = { url: null, token: null, lastOk: null, ok: null };
@@ -173,13 +162,26 @@
   // first run: follow the browser language, then remember whatever the user picks
   if (!S.ui.lang) S.ui.lang = /^ru\b/i.test(navigator.language || '') ? 'ru' : 'en';
 
+  // TZ 31.1 §7: one-time cleanup on upgrading to 31.1 — sync (and the history it
+  // fed) is now off by default, so the arrays accumulated under 30.x/31.0 are
+  // just dead weight in localStorage. Runs once ever, guarded by its own flag;
+  // doesn't touch S.sync.url/token so a user who re-enables sync later doesn't
+  // have to retype credentials.
+  if (!S.histCleanedV311) {
+    S.hist = {};
+    S.pairsPrev = null;
+    S.histCleanedV311 = true;
+    saveState();
+  }
+
   /* ================= I18N ================= */
   // UI strings only. Code and comments stay English so the repo is contributor-friendly.
   const I18N = {
     en: {
       code: 'EN',
+      kindLabels: { session: '5-hour', weekly_all: 'Weekly' },
       waitingData: '⏳ waiting for data', notStarted: 'not started',
-      resetsIn: t => 'resets in ' + t,
+      resetsInWord: 'resets in',
       creditsLabel: 'Credits', headroomLabel: 'Headroom', untilDate: d => 'until ' + d,
       creditsOffWarn: '⚠ credits OFF — work will stop when the plan limit is hit',
       spendLimitWarn: '⚠ monthly spend limit reached',
@@ -189,6 +191,8 @@
       tipRefresh: 'Refresh', tipCollapse: 'Collapse', tipLang: 'Switch language',
       tipSync: 'Sync settings', syncUrlPh: 'Sync URL', syncTokenPh: 'Sync token',
       syncSave: 'Save', syncClear: 'Disable', syncCancel: 'Cancel',
+      syncDisableWarn: 'Disabling erases the saved token — re-enter it to turn sync back on.',
+      syncDisabledNote: 'Sync is off. Fill in and save to turn it on.',
       syncOffline: 'sync: offline', syncAgo: t => 'sync: ' + t,
       storageWarn: '⚠ storage', storageWarnTip: 'localStorage quota is tight — oldest history was trimmed to keep saving',
       rateLimited: t => 'rate-limited — retrying ' + t, paused: t => 'paused · retry ' + t,
@@ -199,8 +203,9 @@
     },
     ru: {
       code: 'RU',
+      kindLabels: { session: '5 часов', weekly_all: 'Неделя' },
       waitingData: '⏳ ожидание данных', notStarted: 'не начато',
-      resetsIn: t => 'сброс через ' + t,
+      resetsInWord: 'сброс через',
       creditsLabel: 'Кредиты', headroomLabel: 'Запас', untilDate: d => 'до ' + d,
       creditsOffWarn: '⚠ credits выключены — при исчерпании лимита работа встанет',
       spendLimitWarn: '⚠ месячный лимит трат достигнут',
@@ -210,6 +215,8 @@
       tipRefresh: 'Обновить', tipCollapse: 'Свернуть', tipLang: 'Переключить язык',
       tipSync: 'Настройки синхронизации', syncUrlPh: 'URL синхронизации', syncTokenPh: 'Токен синхронизации',
       syncSave: 'Сохранить', syncClear: 'Выключить', syncCancel: 'Отмена',
+      syncDisableWarn: 'Выключение сотрёт сохранённый токен — при включении его нужно будет ввести заново.',
+      syncDisabledNote: 'Синхронизация выключена. Заполни и сохрани, чтобы включить.',
       syncOffline: 'синхр.: офлайн', syncAgo: t => 'синхр.: ' + t,
       storageWarn: '⚠ память', storageWarnTip: 'локальное хранилище почти заполнено — старая история обрезана, чтобы сохранение продолжало работать',
       rateLimited: t => 'ограничение частоты — повтор ' + t, paused: t => 'пауза · повтор ' + t,
@@ -384,16 +391,22 @@
     }
     S.last = data; S.parsed = parsed; S.parseError = null; S.lastT = Date.now();
 
-    for (const l of parsed.limits) pushHist(l.kind, l.percent != null ? l.percent : 0);
-    if (parsed.spend && parsed.spend.limit != null) {
-      const pct = parsed.spend.percent != null ? parsed.spend.percent
-        : (parsed.spend.limit > 0 ? parsed.spend.used / parsed.spend.limit * 100 : 0);
-      pushHist('spend', pct);
+    // TZ 31.1 §6: local history collection is stubbed out along with sync itself —
+    // nothing reads S.hist except the sync payload, so there's no point accumulating
+    // it while sync is off. Code stays intact; only the execution path is gated,
+    // so turning sync back on resumes collection with a single flag flip.
+    if (S.syncEnabled) {
+      for (const l of parsed.limits) pushHist(l.kind, l.percent != null ? l.percent : 0);
+      if (parsed.spend && parsed.spend.limit != null) {
+        const pct = parsed.spend.percent != null ? parsed.spend.percent
+          : (parsed.spend.limit > 0 ? parsed.spend.used / parsed.spend.limit * 100 : 0);
+        pushHist('spend', pct);
+      }
+      const sess = parsed.limits.find(l => l.kind === 'session');
+      const week = parsed.limits.find(l => l.kind === 'weekly_all');
+      recordPair(sess ? sess.percent : null, week ? week.percent : null);
     }
     logActiveChanges(parsed.limits);
-    const sess = parsed.limits.find(l => l.kind === 'session');
-    const week = parsed.limits.find(l => l.kind === 'weekly_all');
-    recordPair(sess ? sess.percent : null, week ? week.percent : null);
 
     scheduleNextPoll();  // passive ingest resets the active-poll timer too
     saveState(); render();
@@ -435,6 +448,9 @@
   }
 
   async function syncNow() {
+    // TZ 31.1 §1/§3: off by default, and while off this must be the only check —
+    // zero requests to the worker domain, not even a check of stored credentials.
+    if (!S.syncEnabled) return;
     if (!S.sync || !S.sync.url || !S.sync.token) return;
     const ac = new AbortController();
     const abortT = setTimeout(() => ac.abort(), 10000); // a silently-dropped connection must not hang indefinitely
@@ -511,8 +527,10 @@
 .clt-row .n{color:#c9c9d2;flex:0 0 auto;}
 .clt-row .v{font-weight:700;flex:0 0 auto;}
 .clt-row .r{color:#8b8b94;margin-left:auto;text-align:right;font-size:11px;white-space:nowrap;}
+.clt-row .r b{color:#e8e8ee;font-weight:700;font-style:normal;}
 .clt-warn{font-size:11px;margin-top:2px;padding:2px 0;color:${COLORS.bad};font-weight:500;}
 .clt-sync{padding:2px 0 12px;border-bottom:1px solid #26262d;margin-bottom:2px;}
+.clt-sync-note{font-size:10.5px;color:#8b8b94;margin-bottom:8px;line-height:1.4;}
 .clt-sync input{width:100%;box-sizing:border-box;background:#0f0f13;border:1px solid #33333c;border-radius:8px;color:#e8e8ee;font-size:13px;padding:9px 10px;margin-bottom:8px;min-height:36px;}
 .clt-sync input:focus{outline:none;border-color:${COLORS.accent};}
 .clt-sync-btns{display:flex;gap:8px;justify-content:flex-end;}
@@ -575,7 +593,14 @@
   }
 
   function syncFormHtml() {
+    // TZ 31.1 §2: the warning shows *before* Disable is clicked, not as an
+    // after-the-fact confirmation — it's a static caption, always visible
+    // whenever there's a token that Disable would actually erase.
+    const note = S.syncEnabled
+      ? `<div class="clt-sync-note">${L().syncDisableWarn}</div>`
+      : `<div class="clt-sync-note">${L().syncDisabledNote}</div>`;
     return `<div class="clt-sync">
+      ${note}
       <input id="clt-sync-url" type="text" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="${L().syncUrlPh}" value="${esc(S.sync.url || '')}">
       <input id="clt-sync-token" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="${L().syncTokenPh}" value="${esc(S.sync.token || '')}">
       <div class="clt-sync-btns">
@@ -592,6 +617,9 @@
     const now = Date.now();
     const idle = l.kind === 'session' && (!l.resetsAt || l.resetsAt <= now);
     const col = severityColor(l.severity);
+    // session/weekly_all get a proper localized name; anything else falls back
+    // to the generic humanized label parseUsage already computed.
+    const label = (L().kindLabels && L().kindLabels[l.kind]) || l.label;
     let valueTxt;
     if (l.dollars && (l.dollars.used != null || l.dollars.remaining != null)) {
       valueTxt = l.dollars.used != null && l.dollars.limit != null
@@ -600,11 +628,13 @@
     } else {
       valueTxt = idle ? '0%' : (l.percent != null ? Math.round(l.percent) + '%' : '—');
     }
+    // the countdown figure itself is highlighted bright/bold, same treatment as
+    // the Headroom value — everything around it (the label word) stays muted.
     let right;
-    if (idle) right = L().notStarted;
-    else if (l.resetsAt && l.resetsAt > now) right = L().resetsIn(fmtCountdown(l.resetsAt - now));
+    if (idle) right = esc(L().notStarted);
+    else if (l.resetsAt && l.resetsAt > now) right = esc(L().resetsInWord) + ' <b class="rt">' + esc(fmtCountdown(l.resetsAt - now)) + '</b>';
     else right = '';
-    return `<div class="clt-row"><span class="n">${esc(l.label)}</span><span class="v" style="color:${col}">${valueTxt}</span><span class="r">${esc(right)}</span></div>`;
+    return `<div class="clt-row"><span class="n">${esc(label)}</span><span class="v" style="color:${col}">${valueTxt}</span><span class="r">${right}</span></div>`;
   }
 
   function creditsRowHtml(spend) {
@@ -647,7 +677,8 @@
     if (S.parseError) {
       return `<div class="clt-ft"><a href="/settings/usage" target="_blank">${L().fullDetail}</a><span class="sp"></span><span>v${VERSION}</span></div>`;
     }
-    const syncBit = !S.sync.url ? '' : (S.sync.ok === false)
+    // TZ 31.1 §3: silent about sync entirely while it's off — not even "offline"
+    const syncBit = (!S.syncEnabled || !S.sync.url) ? '' : (S.sync.ok === false)
       ? `<span style="color:#fbbf24">${L().syncOffline}</span>`
       : (S.sync.lastOk ? `<span style="color:#5f5f68">${L().syncAgo(fmtAgo(Date.now() - S.sync.lastOk))}</span>` : '');
     const storBit = S.storageWarn ? `<span style="color:#fbbf24" title="${L().storageWarnTip}">${L().storageWarn}</span>` : '';
@@ -713,11 +744,15 @@
       if (saveB) saveB.onclick = () => {
         const url = ((uEl && uEl.value) || '').trim(), token = ((tEl && tEl.value) || '').trim();
         S.sync = { url: url || null, token: token || null, lastOk: null, ok: null };
+        S.syncEnabled = !!(S.sync.url && S.sync.token);   // TZ 31.1 §2: Save turns sync on
         syncFormOpen = false; saveState(); render();
-        if (S.sync.url && S.sync.token) syncNow();
+        if (S.syncEnabled) syncNow();
       };
       if (clearB) clearB.onclick = () => {
+        // TZ 31.1 §2: Disable erases the stored URL/token, not just the flag —
+        // re-enabling later means typing them in again.
         S.sync = { url: null, token: null, lastOk: null, ok: null };
+        S.syncEnabled = false;
         syncFormOpen = false; saveState(); render();
       };
       if (cancelB) cancelB.onclick = () => { syncFormOpen = false; render(); };

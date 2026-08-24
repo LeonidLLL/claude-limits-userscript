@@ -58,24 +58,30 @@ Money fields (`amount_minor` / `exponent`) are converted as `amount_minor /
 come from the server's `limits[]` array (already rounded); `extra_usage`'s
 utilization is a genuine float and is left as-is.
 
-## Cross-device sync (optional)
+## Cross-device sync (off by default)
 
-`S.hist` lives in `localStorage`, which is per-device. If you use Claude from more
-than one device, the ⇄ button opens a small form for a sync endpoint URL and
-token — a small self-hosted server (a Cloudflare Worker reference implementation is
-in [`worker/sync-worker.js`](worker/sync-worker.js); see
-[`docs/TZ-sync-etap9.md`](docs/TZ-sync-etap9.md) for the protocol) that merges
-history from every device that pushes to it. Off by default; nothing leaves the
-browser unless a URL and token are configured. Sync runs every 15 minutes and on
-startup, fails silently on network/auth errors (shown as `sync: offline` in the
-footer, never thrown as an exception), and always calls the endpoint directly via
-the browser's native `fetch` — never through anything the script itself
+`S.hist` lives in `localStorage`, which is per-device. Since the widget itself
+never reads history back for anything shown on screen, sync — and the local
+history collection that feeds it — is inert until you turn it on: no timer, no
+requests, nothing written to `S.hist`.
+
+If you do use Claude from more than one device, the ⇄ button opens a small form
+for a sync endpoint URL and token. Saving turns sync on; a small self-hosted
+server (a Cloudflare Worker reference implementation is in
+[`worker/sync-worker.js`](worker/sync-worker.js); see
+[`docs/TZ-sync-etap9.md`](docs/TZ-sync-etap9.md) for the protocol) then merges
+history from every device that pushes to it. **Disable** erases the stored URL
+and token outright — turning sync back on later means re-entering them, which the
+form tells you before you click it. Sync runs every 15 minutes and on startup
+while enabled, fails silently on network/auth errors (shown as `sync: offline` in
+the footer, never thrown as an exception), and always calls the endpoint directly
+via the browser's native `fetch` — never through anything the script itself
 intercepts.
 
-This history is written for continuity and for [`lib/ceiling.js`](lib/ceiling.js)
-(an unwired, tested-but-unused weekly-ceiling estimator kept around for a possible
-future stage) — the widget itself never reads it back for anything shown on
-screen.
+This history also feeds [`lib/ceiling.js`](lib/ceiling.js) (an unwired,
+tested-but-unused weekly-ceiling estimator kept around for a possible future
+stage) once sync is on — the widget itself never reads it back for anything shown
+on screen.
 
 ## Install
 
